@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from datetime import datetime
+import pymc as pm
 
 
 def _parse_date_input(date_input):
@@ -65,6 +66,49 @@ def _parse_date_input(date_input):
         raise ValueError("date_input must be int (day_of_year), str ('MM/DD'), or tuple (month, day)")
     
     return day_of_year, day_name
+
+
+def _evaluate_model_for_day(trace, day_of_year):
+    """
+    Helper function to evaluate model for a specific day using posterior samples.
+    
+    This function centralizes the model evaluation logic that was previously duplicated
+    across multiple functions. While it doesn't use PyMC's eval_in_model (because the
+    model wasn't designed for arbitrary new data), it provides a clean, centralized
+    way to make predictions for new days using the posterior samples.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from sampling
+    day_of_year : int
+        Day of year (1-365)
+    
+    Returns:
+    --------
+    tuple : (rain_probs, expected_amounts, alpha_amounts)
+        Arrays of rain probabilities, expected rainfall amounts, and alpha parameters for all posterior samples
+    """
+    day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
+    day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
+    
+    # Get parameter samples
+    a_rain_samples = trace.posterior.a_rain.values.flatten()
+    b_rain_samples = trace.posterior.b_rain.values.flatten()
+    c_rain_samples = trace.posterior.c_rain.values.flatten()
+    a_amount_samples = trace.posterior.a_amount.values.flatten()
+    b_amount_samples = trace.posterior.b_amount.values.flatten()
+    c_amount_samples = trace.posterior.c_amount.values.flatten()
+    alpha_amount_samples = trace.posterior.alpha_amount.values.flatten()
+    
+    # Calculate rain probabilities for all samples
+    logit_p = c_rain_samples + a_rain_samples * day_sin + b_rain_samples * day_cos
+    rain_probs = 1 / (1 + np.exp(-logit_p))
+    
+    # Calculate expected rainfall amounts
+    expected_amounts = np.exp(c_amount_samples + a_amount_samples * day_sin + b_amount_samples * day_cos)
+        
+    return rain_probs, expected_amounts, alpha_amount_samples
 
 
 def print_model_summary(trace, data, param_names=None):
@@ -313,38 +357,24 @@ def analyze_single_day(trace, data, date_input, show_plots=True, figsize=(15, 10
     if len(obs_rainy_days) > 0:
         print(f"  Mean on rainy days: {obs_rainy_mean:.4f} mm")
     
-    # Get model predictions for this day
-    day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
-    day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
-    
-    # Sample predictions
+    # Use helper function to get model predictions
     n_samples = 1000
-    day_predictions = []
-    rain_probabilities = []
+    rain_probs, expected_amounts, alpha_amounts = _evaluate_model_for_day(trace, day_of_year)
     
-    for i in range(min(n_samples, len(trace.posterior.a_rain.values.flatten()))):
-        chain_idx = i // trace.posterior.a_rain.shape[1]
-        sample_idx = i % trace.posterior.a_rain.shape[1]
-        
-        a_rain = trace.posterior.a_rain.values[chain_idx, sample_idx]
-        b_rain = trace.posterior.b_rain.values[chain_idx, sample_idx]
-        c_rain = trace.posterior.c_rain.values[chain_idx, sample_idx]
-        a_amount = trace.posterior.a_amount.values[chain_idx, sample_idx]
-        b_amount = trace.posterior.b_amount.values[chain_idx, sample_idx]
-        c_amount = trace.posterior.c_amount.values[chain_idx, sample_idx]
-        alpha_amount = trace.posterior.alpha_amount.values[chain_idx, sample_idx]
-        
-        # Calculate rain probability
-        logit_p = c_rain + a_rain * day_sin + b_rain * day_cos
-        p_rain = 1 / (1 + np.exp(-logit_p))
-        rain_probabilities.append(p_rain)
-        
+    # Limit to requested number of samples
+    n_samples = min(n_samples, len(rain_probs))
+    rain_probs = rain_probs[:n_samples]
+    expected_amounts = expected_amounts[:n_samples]
+    alpha_amounts = alpha_amounts[:n_samples]
+    
+    # Generate rainfall samples
+    day_predictions = []
+    for i, (p_rain, mu_amount, alpha_amount) in enumerate(zip(rain_probs, expected_amounts, alpha_amounts)):
         # Sample rain indicator
         rain_indicator = np.random.binomial(1, p_rain)
         
         # Sample rainfall amount if it rains
         if rain_indicator == 1:
-            mu_amount = np.exp(c_amount + a_amount * day_sin + b_amount * day_cos)
             rainfall = np.random.gamma(alpha_amount, mu_amount / alpha_amount)
         else:
             rainfall = 0
@@ -352,7 +382,7 @@ def analyze_single_day(trace, data, date_input, show_plots=True, figsize=(15, 10
         day_predictions.append(rainfall)
     
     day_predictions = np.array(day_predictions)
-    rain_probabilities = np.array(rain_probabilities)
+    rain_probabilities = rain_probs
     
     # Calculate predicted statistics
     pred_mean = np.mean(day_predictions)
@@ -517,6 +547,8 @@ def calculate_rainfall_interval_probability(trace, date_input, interval_min=None
     -----------
     trace : arviz.InferenceData
         MCMC trace from sampling
+    model : pymc.Model
+        PyMC model
     date_input : int, str, or tuple
         - int: day of year (1-365)
         - str: "MM/DD" format (e.g., "01/15")
@@ -548,34 +580,23 @@ def calculate_rainfall_interval_probability(trace, date_input, interval_min=None
     """
     day_of_year, day_name = _parse_date_input(date_input)
     
-    day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
-    day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
+    # Use helper function to get model predictions
+    rain_probs, expected_amounts, alpha_amounts = _evaluate_model_for_day(trace, day_of_year)
     
-    # Sample predictions
+    # Limit to requested number of samples
+    n_samples = min(n_samples, len(rain_probs))
+    rain_probs = rain_probs[:n_samples]
+    expected_amounts = expected_amounts[:n_samples]
+    alpha_amounts = alpha_amounts[:n_samples]
+    
+    # Generate rainfall samples
     day_predictions = []
-    
-    for i in range(min(n_samples, len(trace.posterior.a_rain.values.flatten()))):
-        chain_idx = i // trace.posterior.a_rain.shape[1]
-        sample_idx = i % trace.posterior.a_rain.shape[1]
-        
-        a_rain = trace.posterior.a_rain.values[chain_idx, sample_idx]
-        b_rain = trace.posterior.b_rain.values[chain_idx, sample_idx]
-        c_rain = trace.posterior.c_rain.values[chain_idx, sample_idx]
-        a_amount = trace.posterior.a_amount.values[chain_idx, sample_idx]
-        b_amount = trace.posterior.b_amount.values[chain_idx, sample_idx]
-        c_amount = trace.posterior.c_amount.values[chain_idx, sample_idx]
-        alpha_amount = trace.posterior.alpha_amount.values[chain_idx, sample_idx]
-        
-        # Calculate rain probability
-        logit_p = c_rain + a_rain * day_sin + b_rain * day_cos
-        p_rain = 1 / (1 + np.exp(-logit_p))
-        
+    for i, (p_rain, mu_amount, alpha_amount) in enumerate(zip(rain_probs, expected_amounts, alpha_amounts)):
         # Sample rain indicator
         rain_indicator = np.random.binomial(1, p_rain)
         
         # Sample rainfall amount if it rains
         if rain_indicator == 1:
-            mu_amount = np.exp(c_amount + a_amount * day_sin + b_amount * day_cos)
             rainfall = np.random.gamma(alpha_amount, mu_amount / alpha_amount)
         else:
             rainfall = 0
@@ -641,6 +662,8 @@ def print_rainfall_interval_probability(trace, date_input, interval_min=None, in
     -----------
     trace : arviz.InferenceData
         MCMC trace from sampling
+    model : pymc.Model
+        PyMC model
     date_input : int, str, or tuple
         - int: day of year (1-365)
         - str: "MM/DD" format (e.g., "01/15")
@@ -675,6 +698,8 @@ def calculate_any_rain_probability(trace, date_input, n_samples=1000):
     -----------
     trace : arviz.InferenceData
         MCMC trace from sampling
+    model : pymc.Model
+        PyMC model
     date_input : int, str, or tuple
         - int: day of year (1-365)
         - str: "MM/DD" format (e.g., "01/15")
@@ -688,26 +713,12 @@ def calculate_any_rain_probability(trace, date_input, n_samples=1000):
     """
     day_of_year, day_name = _parse_date_input(date_input)
     
-    day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
-    day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
+    # Use helper function to get model predictions
+    rain_probs, _, _ = _evaluate_model_for_day(trace, day_of_year)
     
-    # Sample rain probabilities
-    rain_probabilities = []
-    
-    for i in range(min(n_samples, len(trace.posterior.a_rain.values.flatten()))):
-        chain_idx = i // trace.posterior.a_rain.shape[1]
-        sample_idx = i % trace.posterior.a_rain.shape[1]
-        
-        a_rain = trace.posterior.a_rain.values[chain_idx, sample_idx]
-        b_rain = trace.posterior.b_rain.values[chain_idx, sample_idx]
-        c_rain = trace.posterior.c_rain.values[chain_idx, sample_idx]
-        
-        # Calculate rain probability
-        logit_p = c_rain + a_rain * day_sin + b_rain * day_cos
-        p_rain = 1 / (1 + np.exp(-logit_p))
-        rain_probabilities.append(p_rain)
-    
-    rain_probabilities = np.array(rain_probabilities)
+    # Limit to requested number of samples
+    n_samples = min(n_samples, len(rain_probs))
+    rain_probabilities = rain_probs[:n_samples]
     
     # Calculate statistics
     mean_prob = np.mean(rain_probabilities)
@@ -736,6 +747,8 @@ def print_any_rain_probability(trace, date_input, n_samples=1000):
     -----------
     trace : arviz.InferenceData
         MCMC trace from sampling
+    model : pymc.Model
+        PyMC model
     date_input : int, str, or tuple
         - int: day of year (1-365)
         - str: "MM/DD" format (e.g., "01/15")
@@ -774,24 +787,21 @@ def print_simple_daily_rainfall_analysis(trace, date_input="01/15"):
     print("=" * 60)
     print(f"Date analyzed: {date_input}\n")
 
-    # Case 1: No bounds (any rainfall)
     prob_any = calculate_rainfall_interval_probability(trace, date_input)
     print(f"Any rainfall: {prob_any['probability']:.3f}")
+    print()
 
     prob_negligible = calculate_rainfall_interval_probability(trace, date_input, interval_max=0.1)
     print(f"Negligible rain (<0.1 mm): {prob_negligible['probability']:.3f}")
 
-    # Case 2: Heavy rain (>10 mm)
-    prob_heavy = calculate_rainfall_interval_probability(trace, date_input, interval_min=10.0)
-    print(f"Heavy rain (>10 mm): {prob_heavy['probability']:.3f}")
-
-    # Case 3: Light rain (0.1–2.5 mm)
     prob_light = calculate_rainfall_interval_probability(trace, date_input, interval_min=0.1, interval_max=2.5)
     print(f"Light rain (0.1–2.5 mm): {prob_light['probability']:.3f}")
 
-    # Case 4: Moderate rain (2.5–10 mm)
     prob_moderate = calculate_rainfall_interval_probability(trace, date_input, interval_min=2.5, interval_max=10.0)
     print(f"Moderate rain (2.5–10 mm): {prob_moderate['probability']:.3f}")
+
+    prob_heavy = calculate_rainfall_interval_probability(trace, date_input, interval_min=10.0)
+    print(f"Heavy rain (>10 mm): {prob_heavy['probability']:.3f}")
 
     print("\nNote: These should sum to 1.0 (with some rounding error)")
     total = prob_heavy['probability'] + prob_light['probability'] + prob_moderate['probability'] + prob_negligible['probability']

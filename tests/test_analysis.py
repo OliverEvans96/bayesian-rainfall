@@ -555,7 +555,11 @@ class TestCalculateAnyRainProbability:
         posterior_data = {
             'a_rain': np.random.normal(0, 1, (2, 100)),
             'b_rain': np.random.normal(0, 1, (2, 100)),
-            'c_rain': np.random.normal(0, 1, (2, 100))
+            'c_rain': np.random.normal(0, 1, (2, 100)),
+            'a_amount': np.random.normal(0, 1, (2, 100)),
+            'b_amount': np.random.normal(0, 1, (2, 100)),
+            'c_amount': np.random.normal(1, 1, (2, 100)),
+            'alpha_amount': np.random.gamma(2, 1, (2, 100))
         }
         
         # Create mock trace
