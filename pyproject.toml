@@ -3,8 +3,9 @@ name = "bayesian-rainfall"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
+    "arviz>=0.18.0",
     "ipython>=8.18.1",
     "jupyterlab>=4.4.7",
     "matplotlib>=3.9.4",
