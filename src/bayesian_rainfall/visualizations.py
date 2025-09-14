@@ -154,7 +154,7 @@ def plot_combined_predictions(trace, data, ci_level=0.95, figsize=(14, 10)):
     ax2.plot(days_of_year, pp_amounts_mean, 'orange', linestyle='--', linewidth=2, label='Posterior Predictive Mean')
     ax2.scatter(observed_rainy_days, observed_rainfall, alpha=0.6, color='red', s=20, label='Observed (Rainy Days)')
     ax2.set_xlabel('Day of Year')
-    ax2.set_ylabel('Expected Rainfall Amount (inches)')
+    ax2.set_ylabel('Expected Rainfall Amount (mm)')
     ax2.set_title('Rainfall Amount Predictions for Rainy Days Across the Year')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
@@ -259,7 +259,7 @@ def plot_posterior_predictive_checks(trace, model, data, n_samples=100, figsize=
     
     axes[0, 1].hist(rainy_obs, bins=30, alpha=0.7, label='Observed', density=True)
     axes[0, 1].hist(rainy_pred, bins=30, alpha=0.7, label='Predicted', density=True)
-    axes[0, 1].set_xlabel('Rainfall Amount (inches)')
+    axes[0, 1].set_xlabel('Rainfall Amount (mm)')
     axes[0, 1].set_ylabel('Density')
     axes[0, 1].set_title('Rainfall Amount Distribution')
     axes[0, 1].legend()
@@ -275,7 +275,7 @@ def plot_posterior_predictive_checks(trace, model, data, n_samples=100, figsize=
                            np.percentile(first_100_pred, 97.5, axis=0),
                            alpha=0.3, color='red', label='95% CI')
     axes[1, 0].set_xlabel('Day')
-    axes[1, 0].set_ylabel('Rainfall (inches)')
+    axes[1, 0].set_ylabel('Rainfall (mm)')
     axes[1, 0].set_title('Time Series: First 100 Days')
     axes[1, 0].legend()
     
@@ -385,7 +385,7 @@ def plot_specific_days_comparison(trace, data, selected_days=None, day_names=Non
                        label=f'Pred Mean: {pred_mean:.3f}')
         
         axes[i].set_title(f'{day_name} (Day {day})', fontsize=14, fontweight='bold')
-        axes[i].set_xlabel('Rainfall (inches)', fontsize=12)
+        axes[i].set_xlabel('Rainfall (mm)', fontsize=12)
         axes[i].set_ylabel('Density', fontsize=12)
         axes[i].legend(fontsize=10)
         
@@ -509,7 +509,7 @@ def plot_seasonal_summaries(trace, data, figsize=(16, 12)):
                        label=f'Pred Mean: {pred_mean:.3f}')
         
         axes[i].set_title(f'{season_name} Season', fontsize=14, fontweight='bold')
-        axes[i].set_xlabel('Rainfall (inches)', fontsize=12)
+        axes[i].set_xlabel('Rainfall (mm)', fontsize=12)
         axes[i].set_ylabel('Density', fontsize=12)
         axes[i].legend(fontsize=10)
         
