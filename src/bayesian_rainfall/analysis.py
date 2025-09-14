@@ -625,21 +625,13 @@ def calculate_rainfall_interval_probability(trace, date_input, interval_min=None
     
     prob_in_interval = np.mean(in_interval)
     
-    # Calculate confidence interval for the probability
-    prob_samples = []
-    for _ in range(1000):  # Bootstrap samples
-        bootstrap_sample = np.random.choice(day_predictions, size=len(day_predictions), replace=True)
-        if interval_min is None and interval_max is None:
-            bootstrap_in_interval = bootstrap_sample > 0
-        elif interval_min is None:
-            bootstrap_in_interval = bootstrap_sample <= interval_max
-        elif interval_max is None:
-            bootstrap_in_interval = bootstrap_sample >= interval_min
-        else:
-            bootstrap_in_interval = (bootstrap_sample >= interval_min) & (bootstrap_sample <= interval_max)
-        prob_samples.append(np.mean(bootstrap_in_interval))
-    
-    prob_ci_95 = np.percentile(prob_samples, [2.5, 97.5])
+    # Calculate confidence interval for the probability using binomial approximation
+    n_samples = len(day_predictions)
+    prob_std = np.sqrt(prob_in_interval * (1 - prob_in_interval) / n_samples)
+    prob_ci_95 = [
+        max(0, prob_in_interval - 1.96 * prob_std),
+        min(1, prob_in_interval + 1.96 * prob_std)
+    ]
     
     return {
         'day_of_year': day_of_year,
