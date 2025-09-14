@@ -8,7 +8,7 @@ def load_data(filepath):
     df = pd.read_csv(filepath)
     df['DATE'] = pd.to_datetime(df['DATE'])
     df['day_of_year'] = df['DATE'].dt.dayofyear
-    return df[['PRCP', 'day_of_year']].dropna()
+    return df[['DATE', 'PRCP', 'day_of_year']].dropna()
 
 
 def create_rainfall_model(data):
