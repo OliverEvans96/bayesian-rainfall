@@ -564,48 +564,30 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
             observed_weekly_probs_full[week-1] = 0  # No data for this week
     
     # Create the plot
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize)
+    fig, ax = plt.subplots(1, 1, figsize=(figsize[0], figsize[1]//2))
     
-    # Top plot: Weekly rain probability with confidence intervals
-    ax1.fill_between(weeks, lower_ci, upper_ci, alpha=0.2, color='blue', 
+    # Weekly rain probability with confidence intervals
+    ax.fill_between(weeks, lower_ci, upper_ci, alpha=0.2, color='blue', 
                     label='95% CI (Expected Probability)')
-    ax1.plot(weeks, mean_probs, 'b-', linewidth=2, label='Expected Probability')
-    ax1.fill_between(weeks, pp_lower_ci, pp_upper_ci, alpha=0.3, color='green', 
+    ax.plot(weeks, mean_probs, 'b-', linewidth=2, label='Expected Probability')
+    ax.fill_between(weeks, pp_lower_ci, pp_upper_ci, alpha=0.3, color='green', 
                     label='95% CI (Posterior Predictive)')
-    ax1.plot(weeks, pp_mean, 'g--', linewidth=2, label='Posterior Predictive Mean')
-    ax1.scatter(weeks, observed_weekly_probs_full, color='red', s=30, alpha=0.7, 
+    ax.plot(weeks, pp_mean, 'g--', linewidth=2, label='Posterior Predictive Mean')
+    ax.scatter(weeks, observed_weekly_probs_full, color='red', s=30, alpha=0.7, 
                label='Observed Probability', zorder=5)
-    ax1.set_xlabel('Week of Year')
-    ax1.set_ylabel('Probability of Any Rain')
-    ax1.set_title('Weekly Rain Probability Throughout the Year', fontsize=14, fontweight='bold')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(0, 1)
+    ax.set_xlabel('Week of Year')
+    ax.set_ylabel('Probability of Any Rain')
+    ax.set_title('Weekly Rain Probability Throughout the Year', fontsize=14, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
     
     # Add month labels on x-axis
     month_positions = [1, 5, 9, 13, 17, 22, 26, 30, 35, 39, 43, 47, 52]
     month_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan']
-    ax1.set_xticks(month_positions)
-    ax1.set_xticklabels(month_labels)
-    
-    # Bottom plot: Difference between posterior predictive and observed
-    difference = pp_mean - observed_weekly_probs_full
-    ax2.bar(weeks, difference, alpha=0.7, color='green', width=0.8)
-    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-    ax2.set_xlabel('Week of Year')
-    ax2.set_ylabel('Predicted - Observed')
-    ax2.set_title('Model Prediction Error by Week', fontsize=14, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xticks(month_positions)
-    ax2.set_xticklabels(month_labels)
-    
-    # Add statistics text
-    mae = np.mean(np.abs(difference))
-    rmse = np.sqrt(np.mean(difference**2))
-    ax2.text(0.02, 0.98, f'MAE: {mae:.3f}\nRMSE: {rmse:.3f}', 
-             transform=ax2.transAxes, verticalalignment='top',
-             bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8))
+    ax.set_xticks(month_positions)
+    ax.set_xticklabels(month_labels)
     
     plt.tight_layout()
     plt.show()
@@ -615,8 +597,6 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     print("=" * 50)
     print(f"Peak rain probability: Week {np.argmax(mean_probs) + 1} ({np.max(mean_probs):.3f})")
     print(f"Minimum rain probability: Week {np.argmin(mean_probs) + 1} ({np.min(mean_probs):.3f})")
-    print(f"Average prediction error (MAE): {mae:.3f}")
-    print(f"Root mean square error (RMSE): {rmse:.3f}")
     
     return {
         'weeks': weeks,
@@ -626,7 +606,5 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
         'posterior_predictive_probs': pp_mean,
         'pp_lower_ci': pp_lower_ci,
         'pp_upper_ci': pp_upper_ci,
-        'observed_probs': observed_weekly_probs_full,
-        'mae': mae,
-        'rmse': rmse
+        'observed_probs': observed_weekly_probs_full
     }
