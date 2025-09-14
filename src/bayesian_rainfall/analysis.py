@@ -766,7 +766,7 @@ def print_any_rain_probability(trace, date_input, n_samples=1000):
 
 def print_simple_daily_rainfall_analysis(trace, date_input="01/15"):
     """
-    Print example rainfall interval probabilities for a given date.
+    Print example rainfall interval probabilities for a given date with confidence intervals.
     
     Parameters
     ----------
@@ -780,21 +780,28 @@ def print_simple_daily_rainfall_analysis(trace, date_input="01/15"):
     print(f"Date analyzed: {date_input}\n")
 
     prob_any = calculate_rainfall_interval_probability(trace, date_input)
-    print(f"Any rainfall: {prob_any['probability']:.3f}")
+    ci_any = prob_any['probability_ci_95']
+    print(f"Any rainfall: {prob_any['probability']:.3f} ± {(ci_any[1] - ci_any[0])/2:.3f}")
     print()
 
     prob_negligible = calculate_rainfall_interval_probability(trace, date_input, interval_max=0.1)
-    print(f"Negligible rain (<0.1 mm): {prob_negligible['probability']:.3f}")
+    ci_neg = prob_negligible['probability_ci_95']
+    print(f"Negligible rain (<0.1 mm): {prob_negligible['probability']:.3f} ± {(ci_neg[1] - ci_neg[0])/2:.3f}")
 
     prob_light = calculate_rainfall_interval_probability(trace, date_input, interval_min=0.1, interval_max=2.5)
-    print(f"Light rain (0.1–2.5 mm): {prob_light['probability']:.3f}")
+    ci_light = prob_light['probability_ci_95']
+    print(f"Light rain (0.1–2.5 mm): {prob_light['probability']:.3f} ± {(ci_light[1] - ci_light[0])/2:.3f}")
 
     prob_moderate = calculate_rainfall_interval_probability(trace, date_input, interval_min=2.5, interval_max=10.0)
-    print(f"Moderate rain (2.5–10 mm): {prob_moderate['probability']:.3f}")
+    ci_mod = prob_moderate['probability_ci_95']
+    print(f"Moderate rain (2.5–10 mm): {prob_moderate['probability']:.3f} ± {(ci_mod[1] - ci_mod[0])/2:.3f}")
 
     prob_heavy = calculate_rainfall_interval_probability(trace, date_input, interval_min=10.0)
-    print(f"Heavy rain (>10 mm): {prob_heavy['probability']:.3f}")
+    ci_heavy = prob_heavy['probability_ci_95']
+    print(f"Heavy rain (>10 mm): {prob_heavy['probability']:.3f} ± {(ci_heavy[1] - ci_heavy[0])/2:.3f}")
 
     print("\nNote: These should sum to 1.0 (with some rounding error)")
     total = prob_heavy['probability'] + prob_light['probability'] + prob_moderate['probability'] + prob_negligible['probability']
     print(f"Sum: {total:.3f}")
+    
+    print("\nConfidence intervals reflect uncertainty in the probability estimates due to parameter uncertainty.")
