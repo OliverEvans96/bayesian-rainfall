@@ -71,42 +71,52 @@ def _parse_date_input(date_input):
 def _evaluate_model_for_day(trace, day_of_year):
     """
     Helper function to evaluate model for a specific day using posterior samples.
-    
+
     This function centralizes the model evaluation logic that was previously duplicated
     across multiple functions. While it doesn't use PyMC's eval_in_model (because the
     model wasn't designed for arbitrary new data), it provides a clean, centralized
     way to make predictions for new days using the posterior samples.
-    
+
     Parameters:
     -----------
     trace : arviz.InferenceData
         MCMC trace from sampling
     day_of_year : int
         Day of year (1-365)
-    
+
     Returns:
     --------
     tuple : (rain_probs, expected_amounts, alpha_amounts)
         Arrays of rain probabilities, expected rainfall amounts, and alpha parameters for all posterior samples
     """
-    day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
-    day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
+    # Get the number of harmonics from the trace
+    n_harmonics = trace.posterior.a_rain.shape[-1]
+    
+    # Create harmonic features for the specific day (vectorized)
+    h_values = np.arange(1, n_harmonics + 1)  # Shape: (n_harmonics,)
+    day_sin = np.sin(2 * h_values * np.pi * day_of_year / 365.25)  # Shape: (n_harmonics,)
+    day_cos = np.cos(2 * h_values * np.pi * day_of_year / 365.25)  # Shape: (n_harmonics,)
     
     # Get parameter samples
-    a_rain_samples = trace.posterior.a_rain.values.flatten()
-    b_rain_samples = trace.posterior.b_rain.values.flatten()
-    c_rain_samples = trace.posterior.c_rain.values.flatten()
-    a_amount_samples = trace.posterior.a_amount.values.flatten()
-    b_amount_samples = trace.posterior.b_amount.values.flatten()
-    c_amount_samples = trace.posterior.c_amount.values.flatten()
-    alpha_amount_samples = trace.posterior.alpha_amount.values.flatten()
+    a_rain_samples = trace.posterior.a_rain.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    b_rain_samples = trace.posterior.b_rain.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    c_rain_samples = trace.posterior.c_rain.values.flatten()  # Shape: (n_samples,)
+    a_amount_samples = trace.posterior.a_amount.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    b_amount_samples = trace.posterior.b_amount.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    c_amount_samples = trace.posterior.c_amount.values.flatten()  # Shape: (n_samples,)
+    alpha_amount_samples = trace.posterior.alpha_amount.values.flatten()  # Shape: (n_samples,)
     
-    # Calculate rain probabilities for all samples
-    logit_p = c_rain_samples + a_rain_samples * day_sin + b_rain_samples * day_cos
+    # Calculate rain probabilities for all samples (vectorized)
+    # a_rain_samples: (n_samples, n_harmonics), day_sin: (n_harmonics,)
+    # Result: (n_samples,) - sum over harmonics dimension
+    logit_p = c_rain_samples + np.sum(a_rain_samples * day_sin + b_rain_samples * day_cos, axis=1)
     rain_probs = 1 / (1 + np.exp(-logit_p))
     
-    # Calculate expected rainfall amounts
-    expected_amounts = np.exp(c_amount_samples + a_amount_samples * day_sin + b_amount_samples * day_cos)
+    # Calculate expected rainfall amounts (vectorized)
+    # a_amount_samples: (n_samples, n_harmonics), day_sin: (n_harmonics,)
+    # Result: (n_samples,) - sum over harmonics dimension
+    log_mu_amount = c_amount_samples + np.sum(a_amount_samples * day_sin + b_amount_samples * day_cos, axis=1)
+    expected_amounts = np.exp(log_mu_amount)
         
     return rain_probs, expected_amounts, alpha_amount_samples
 
@@ -174,37 +184,43 @@ def print_model_summary(trace, data, param_names=None):
     if param_names is None:
         param_names = ['a_rain', 'b_rain', 'c_rain', 'a_amount', 'b_amount', 'c_amount', 'alpha_amount']
     
-    # Calculate seasonal patterns for rain probability and amounts
+    # Get the number of harmonics from the trace
+    n_harmonics = trace.posterior.a_rain.shape[-1]
+    
+    # Calculate seasonal patterns for rain probability and amounts (vectorized)
     days_of_year = np.arange(1, 366)
-    day_sin_pred = np.sin(2 * np.pi * days_of_year / 365.25)
-    day_cos_pred = np.cos(2 * np.pi * days_of_year / 365.25)
+    
+    # Create harmonic features for all days (vectorized)
+    h_values = np.arange(1, n_harmonics + 1)[:, None]  # Shape: (n_harmonics, 1)
+    day_values = days_of_year[None, :]  # Shape: (1, n_days)
+    
+    # Vectorized harmonic calculations
+    day_sin_pred = np.sin(2 * h_values * np.pi * day_values / 365.25)  # Shape: (n_harmonics, n_days)
+    day_cos_pred = np.cos(2 * h_values * np.pi * day_values / 365.25)  # Shape: (n_harmonics, n_days)
     
     # Get posterior samples
-    a_rain_samples = trace.posterior.a_rain.values.flatten()
-    b_rain_samples = trace.posterior.b_rain.values.flatten()
-    c_rain_samples = trace.posterior.c_rain.values.flatten()
-    a_amount_samples = trace.posterior.a_amount.values.flatten()
-    b_amount_samples = trace.posterior.b_amount.values.flatten()
-    c_amount_samples = trace.posterior.c_amount.values.flatten()
+    a_rain_samples = trace.posterior.a_rain.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    b_rain_samples = trace.posterior.b_rain.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    c_rain_samples = trace.posterior.c_rain.values.flatten()  # Shape: (n_samples,)
+    a_amount_samples = trace.posterior.a_amount.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    b_amount_samples = trace.posterior.b_amount.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    c_amount_samples = trace.posterior.c_amount.values.flatten()  # Shape: (n_samples,)
     
-    # Calculate rain probabilities
-    rain_probs = []
-    for i in range(len(a_rain_samples)):
-        logit_p = c_rain_samples[i] + a_rain_samples[i] * day_sin_pred + b_rain_samples[i] * day_cos_pred
-        p_rain = 1 / (1 + np.exp(-logit_p))
-        rain_probs.append(p_rain)
+    # Calculate rain probabilities (vectorized)
+    # a_rain_samples: (n_samples, n_harmonics), day_sin_pred: (n_harmonics, n_days)
+    # Result: (n_samples, n_days) - sum over harmonics dimension
+    logit_p = c_rain_samples[:, None] + np.sum(a_rain_samples[:, :, None] * day_sin_pred[None, :, :] + 
+                                               b_rain_samples[:, :, None] * day_cos_pred[None, :, :], axis=1)
+    rain_probs = 1 / (1 + np.exp(-logit_p))  # Shape: (n_samples, n_days)
+    rain_prob_mean = np.mean(rain_probs, axis=0)  # Shape: (n_days,)
     
-    rain_probs = np.array(rain_probs)
-    rain_prob_mean = np.mean(rain_probs, axis=0)
-    
-    # Calculate rainfall amounts
-    rainfall_amounts = []
-    for i in range(len(a_amount_samples)):
-        mu_amount = np.exp(c_amount_samples[i] + a_amount_samples[i] * day_sin_pred + b_amount_samples[i] * day_cos_pred)
-        rainfall_amounts.append(mu_amount)
-    
-    rainfall_amounts = np.array(rainfall_amounts)
-    rainfall_mean = np.mean(rainfall_amounts, axis=0)
+    # Calculate rainfall amounts (vectorized)
+    # a_amount_samples: (n_samples, n_harmonics), day_sin_pred: (n_harmonics, n_days)
+    # Result: (n_samples, n_days) - sum over harmonics dimension
+    log_mu_amount = c_amount_samples[:, None] + np.sum(a_amount_samples[:, :, None] * day_sin_pred[None, :, :] + 
+                                                      b_amount_samples[:, :, None] * day_cos_pred[None, :, :], axis=1)
+    rainfall_amounts = np.exp(log_mu_amount)  # Shape: (n_samples, n_days)
+    rainfall_mean = np.mean(rainfall_amounts, axis=0)  # Shape: (n_days,)
     
     print("=== MODEL SUMMARY ===")
     print(f"Total observations: {len(data)}")
@@ -217,32 +233,43 @@ def print_model_summary(trace, data, param_names=None):
     print("R-hat values (should be < 1.01):")
     for param in param_names:
         rhat = az.rhat(trace, var_names=[param])[param].values
-        print(f"  {param}: {rhat:.4f}")
+        # Handle different array shapes
+        if np.isscalar(rhat):
+            print(f"  {param}: {rhat:.4f}")
+        elif rhat.size == 1:
+            print(f"  {param}: {rhat.item():.4f}")
+        else:
+            # For multi-dimensional parameters, show mean and range
+            rhat_flat = rhat.flatten()
+            print(f"  {param}: mean={rhat_flat.mean():.4f}, range=[{rhat_flat.min():.4f}, {rhat_flat.max():.4f}]")
 
     print("\n=== MODEL FIT ANALYSIS ===")
-    # Calculate model predictions for observed days
+    # Calculate model predictions for observed days (vectorized)
     observed_days = data['day_of_year'].values
-    day_sin_obs = np.sin(2 * np.pi * observed_days / 365.25)
-    day_cos_obs = np.cos(2 * np.pi * observed_days / 365.25)
     
-    # Calculate predicted rain probabilities for observed days
-    predicted_rain_probs = []
-    for i in range(len(a_rain_samples)):
-        logit_p = c_rain_samples[i] + a_rain_samples[i] * day_sin_obs + b_rain_samples[i] * day_cos_obs
-        p_rain = 1 / (1 + np.exp(-logit_p))
-        predicted_rain_probs.append(p_rain)
+    # Create harmonic features for observed days (vectorized)
+    h_values_obs = np.arange(1, n_harmonics + 1)[:, None]  # Shape: (n_harmonics, 1)
+    day_values_obs = observed_days[None, :]  # Shape: (1, n_obs_days)
     
-    predicted_rain_probs = np.array(predicted_rain_probs)
-    predicted_rain_prob_mean = np.mean(predicted_rain_probs, axis=0)
+    # Vectorized harmonic calculations for observed days
+    day_sin_obs = np.sin(2 * h_values_obs * np.pi * day_values_obs / 365.25)  # Shape: (n_harmonics, n_obs_days)
+    day_cos_obs = np.cos(2 * h_values_obs * np.pi * day_values_obs / 365.25)  # Shape: (n_harmonics, n_obs_days)
     
-    # Calculate predicted rainfall amounts for observed days
-    predicted_rainfall_amounts = []
-    for i in range(len(a_amount_samples)):
-        mu_amount = np.exp(c_amount_samples[i] + a_amount_samples[i] * day_sin_obs + b_amount_samples[i] * day_cos_obs)
-        predicted_rainfall_amounts.append(mu_amount)
+    # Calculate predicted rain probabilities for observed days (vectorized)
+    # a_rain_samples: (n_samples, n_harmonics), day_sin_obs: (n_harmonics, n_obs_days)
+    # Result: (n_samples, n_obs_days) - sum over harmonics dimension
+    logit_p_obs = c_rain_samples[:, None] + np.sum(a_rain_samples[:, :, None] * day_sin_obs[None, :, :] + 
+                                                   b_rain_samples[:, :, None] * day_cos_obs[None, :, :], axis=1)
+    predicted_rain_probs = 1 / (1 + np.exp(-logit_p_obs))  # Shape: (n_samples, n_obs_days)
+    predicted_rain_prob_mean = np.mean(predicted_rain_probs, axis=0)  # Shape: (n_obs_days,)
     
-    predicted_rainfall_amounts = np.array(predicted_rainfall_amounts)
-    predicted_rainfall_mean = np.mean(predicted_rainfall_amounts, axis=0)
+    # Calculate predicted rainfall amounts for observed days (vectorized)
+    # a_amount_samples: (n_samples, n_harmonics), day_sin_obs: (n_harmonics, n_obs_days)
+    # Result: (n_samples, n_obs_days) - sum over harmonics dimension
+    log_mu_amount_obs = c_amount_samples[:, None] + np.sum(a_amount_samples[:, :, None] * day_sin_obs[None, :, :] + 
+                                                          b_amount_samples[:, :, None] * day_cos_obs[None, :, :], axis=1)
+    predicted_rainfall_amounts = np.exp(log_mu_amount_obs)  # Shape: (n_samples, n_obs_days)
+    predicted_rainfall_mean = np.mean(predicted_rainfall_amounts, axis=0)  # Shape: (n_obs_days,)
     
     # Rain frequency comparison
     observed_rain_freq = (data['PRCP'] > 0).mean()
@@ -277,16 +304,21 @@ def print_model_summary(trace, data, param_names=None):
         month_data = data[data['month'] == month]
         if len(month_data) > 0:
             month_days = month_data['day_of_year'].values
-            month_sin = np.sin(2 * np.pi * month_days / 365.25)
-            month_cos = np.cos(2 * np.pi * month_days / 365.25)
             
-            month_rain_probs = []
-            for i in range(len(a_rain_samples)):
-                logit_p = c_rain_samples[i] + a_rain_samples[i] * month_sin + b_rain_samples[i] * month_cos
-                p_rain = 1 / (1 + np.exp(-logit_p))
-                month_rain_probs.append(p_rain)
+            # Create harmonic features for month days (vectorized)
+            h_values_month = np.arange(1, n_harmonics + 1)[:, None]  # Shape: (n_harmonics, 1)
+            day_values_month = month_days[None, :]  # Shape: (1, n_month_days)
             
-            month_rain_probs = np.array(month_rain_probs)
+            # Vectorized harmonic calculations for month days
+            month_sin = np.sin(2 * h_values_month * np.pi * day_values_month / 365.25)  # Shape: (n_harmonics, n_month_days)
+            month_cos = np.cos(2 * h_values_month * np.pi * day_values_month / 365.25)  # Shape: (n_harmonics, n_month_days)
+            
+            # Calculate month rain probabilities (vectorized)
+            # a_rain_samples: (n_samples, n_harmonics), month_sin: (n_harmonics, n_month_days)
+            # Result: (n_samples, n_month_days) - sum over harmonics dimension
+            logit_p_month = c_rain_samples[:, None] + np.sum(a_rain_samples[:, :, None] * month_sin[None, :, :] + 
+                                                             b_rain_samples[:, :, None] * month_cos[None, :, :], axis=1)
+            month_rain_probs = 1 / (1 + np.exp(-logit_p_month))  # Shape: (n_samples, n_month_days)
             monthly_pred_rain_freq.append(np.mean(month_rain_probs))
         else:
             monthly_pred_rain_freq.append(0)

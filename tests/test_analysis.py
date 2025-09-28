@@ -138,13 +138,13 @@ class TestPrintModelSummary:
     
     def create_mock_trace(self):
         """Create a mock trace for testing."""
-        # Create mock posterior data
+        # Create mock posterior data with 5 harmonics (matching new default)
         posterior_data = {
-            'a_rain': np.random.normal(0, 1, (2, 1000)),
-            'b_rain': np.random.normal(0, 1, (2, 1000)),
+            'a_rain': np.random.normal(0, 1, (2, 1000, 5)),
+            'b_rain': np.random.normal(0, 1, (2, 1000, 5)),
             'c_rain': np.random.normal(0, 1, (2, 1000)),
-            'a_amount': np.random.normal(0, 1, (2, 1000)),
-            'b_amount': np.random.normal(0, 1, (2, 1000)),
+            'a_amount': np.random.normal(0, 1, (2, 1000, 5)),
+            'b_amount': np.random.normal(0, 1, (2, 1000, 5)),
             'c_amount': np.random.normal(1, 1, (2, 1000)),
             'alpha_amount': np.random.gamma(2, 1, (2, 1000))
         }
@@ -284,13 +284,13 @@ class TestAnalyzeSingleDay:
     
     def create_mock_trace(self):
         """Create a mock trace for testing."""
-        # Create mock posterior data
+        # Create mock posterior data with 5 harmonics (matching new default)
         posterior_data = {
-            'a_rain': np.random.normal(0, 1, (2, 100)),
-            'b_rain': np.random.normal(0, 1, (2, 100)),
+            'a_rain': np.random.normal(0, 1, (2, 100, 5)),
+            'b_rain': np.random.normal(0, 1, (2, 100, 5)),
             'c_rain': np.random.normal(0, 1, (2, 100)),
-            'a_amount': np.random.normal(0, 1, (2, 100)),
-            'b_amount': np.random.normal(0, 1, (2, 100)),
+            'a_amount': np.random.normal(0, 1, (2, 100, 5)),
+            'b_amount': np.random.normal(0, 1, (2, 100, 5)),
             'c_amount': np.random.normal(1, 1, (2, 100)),
             'alpha_amount': np.random.gamma(2, 1, (2, 100))
         }
@@ -430,13 +430,13 @@ class TestCalculateRainfallIntervalProbability:
     
     def create_mock_trace(self):
         """Create a mock trace for testing."""
-        # Create mock posterior data
+        # Create mock posterior data with 5 harmonics (matching new default)
         posterior_data = {
-            'a_rain': np.random.normal(0, 1, (2, 100)),
-            'b_rain': np.random.normal(0, 1, (2, 100)),
+            'a_rain': np.random.normal(0, 1, (2, 100, 5)),
+            'b_rain': np.random.normal(0, 1, (2, 100, 5)),
             'c_rain': np.random.normal(0, 1, (2, 100)),
-            'a_amount': np.random.normal(0, 1, (2, 100)),
-            'b_amount': np.random.normal(0, 1, (2, 100)),
+            'a_amount': np.random.normal(0, 1, (2, 100, 5)),
+            'b_amount': np.random.normal(0, 1, (2, 100, 5)),
             'c_amount': np.random.normal(1, 1, (2, 100)),
             'alpha_amount': np.random.gamma(2, 1, (2, 100))
         }
@@ -552,13 +552,13 @@ class TestCalculateAnyRainProbability:
     
     def create_mock_trace(self):
         """Create a mock trace for testing."""
-        # Create mock posterior data
+        # Create mock posterior data with 5 harmonics (matching new default)
         posterior_data = {
-            'a_rain': np.random.normal(0, 1, (2, 100)),
-            'b_rain': np.random.normal(0, 1, (2, 100)),
+            'a_rain': np.random.normal(0, 1, (2, 100, 5)),
+            'b_rain': np.random.normal(0, 1, (2, 100, 5)),
             'c_rain': np.random.normal(0, 1, (2, 100)),
-            'a_amount': np.random.normal(0, 1, (2, 100)),
-            'b_amount': np.random.normal(0, 1, (2, 100)),
+            'a_amount': np.random.normal(0, 1, (2, 100, 5)),
+            'b_amount': np.random.normal(0, 1, (2, 100, 5)),
             'c_amount': np.random.normal(1, 1, (2, 100)),
             'alpha_amount': np.random.gamma(2, 1, (2, 100))
         }
