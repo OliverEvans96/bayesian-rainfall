@@ -9,6 +9,8 @@ import pandas as pd
 import arviz as az
 import seaborn as sns
 from scipy import stats
+from datetime import datetime, timedelta
+import matplotlib.dates as mdates
 from .analysis import (
     _evaluate_model_for_day,
     _get_year_effects_from_trace,
@@ -18,6 +20,33 @@ from .analysis import (
     _sample_posterior_predictive_hierarchical,
     _get_observed_data
 )
+
+
+def _day_of_year_to_dates(days_of_year, year=2024):
+    """
+    Convert day-of-year values to proper datetime objects for plotting.
+    
+    Parameters:
+    -----------
+    days_of_year : array-like
+        Day of year values (1-365)
+    year : int, optional
+        Year to use for date conversion (default 2024)
+    
+    Returns:
+    --------
+    array : Array of datetime objects
+    """
+    dates = []
+    for day in days_of_year:
+        # Handle leap year
+        if day == 365 and not pd.Timestamp(f"{year}-12-31").is_leap_year:
+            # If it's not a leap year, day 365 should be Dec 31
+            date = datetime(year, 12, 31)
+        else:
+            date = datetime(year, 1, 1) + timedelta(days=int(day) - 1)
+        dates.append(date)
+    return np.array(dates)
 
 
 def _sample_observed_rain_frequencies(rain_probs, n_years=6):
@@ -97,33 +126,46 @@ def _create_combined_plots(days_of_year, rain_prob_mean, rain_prob_lower, rain_p
     """Create the combined plots."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize)
     
+    # Convert day-of-year to dates for proper x-axis
+    dates = _day_of_year_to_dates(days_of_year)
+    observed_dates = _day_of_year_to_dates(observed_days)
+    observed_rainy_dates = _day_of_year_to_dates(observed_rainy_days)
+    
     # Rain probability plot
-    ax1.fill_between(days_of_year, rain_prob_lower, rain_prob_upper, alpha=0.2, color='blue', 
+    ax1.fill_between(dates, rain_prob_lower, rain_prob_upper, alpha=0.2, color='blue', 
                     label=f'{int(ci_level*100)}% CI (Parameter Uncertainty)')
-    ax1.plot(days_of_year, rain_prob_mean, 'b-', linewidth=2, label='Expected Probability')
-    ax1.fill_between(days_of_year, pp_rain_lower, pp_rain_upper, alpha=0.3, color='green', 
+    ax1.plot(dates, rain_prob_mean, 'b-', linewidth=2, label='Expected Probability')
+    ax1.fill_between(dates, pp_rain_lower, pp_rain_upper, alpha=0.3, color='green', 
                     label=f'{int(ci_level*100)}% CI (Observed Frequencies, n={n_years})')
-    ax1.plot(days_of_year, pp_rain_mean, 'g--', linewidth=2, label='Mean Observed Frequency')
-    ax1.scatter(observed_days, observed_rain_prob, alpha=0.6, color='red', s=20, label='Observed')
-    ax1.set_xlabel('Day of Year')
+    ax1.plot(dates, pp_rain_mean, 'g--', linewidth=2, label='Mean Observed Frequency')
+    ax1.scatter(observed_dates, observed_rain_prob, alpha=0.6, color='red', s=20, label='Observed')
     ax1.set_ylabel('Rain Probability')
     ax1.set_title('Rain Probability Predictions Across the Year')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
+    # Format x-axis with month labels
+    ax1.xaxis.set_major_locator(mdates.MonthLocator())
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax1.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
+    
     # Rainfall amount plot
-    ax2.fill_between(days_of_year, rainfall_lower, rainfall_upper, alpha=0.2, color='blue', 
+    ax2.fill_between(dates, rainfall_lower, rainfall_upper, alpha=0.2, color='blue', 
                     label=f'{int(ci_level*100)}% CI (Expected Amount)')
-    ax2.plot(days_of_year, rainfall_mean, 'b-', linewidth=2, label='Expected Amount')
-    ax2.fill_between(days_of_year, pp_amounts_lower, pp_amounts_upper, alpha=0.3, color='orange',
+    ax2.plot(dates, rainfall_mean, 'b-', linewidth=2, label='Expected Amount')
+    ax2.fill_between(dates, pp_amounts_lower, pp_amounts_upper, alpha=0.3, color='orange',
                     label='95% CI (Posterior Predictive)')
-    ax2.plot(days_of_year, pp_amounts_mean, 'orange', linestyle='--', linewidth=2, label='Posterior Predictive Mean')
-    ax2.scatter(observed_rainy_days, observed_rainfall, alpha=0.6, color='red', s=20, label='Observed')
-    ax2.set_xlabel('Day of Year')
+    ax2.plot(dates, pp_amounts_mean, 'orange', linestyle='--', linewidth=2, label='Posterior Predictive Mean')
+    ax2.scatter(observed_rainy_dates, observed_rainfall, alpha=0.6, color='red', s=20, label='Observed')
     ax2.set_ylabel('Expected Rainfall (mm)')
     ax2.set_title('Rainfall Amount Predictions Across the Year')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+    
+    # Format x-axis with month labels
+    ax2.xaxis.set_major_locator(mdates.MonthLocator())
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax2.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
     
     plt.tight_layout()
     plt.show()
@@ -331,16 +373,23 @@ def plot_posterior_predictive_checks(trace, data, n_samples=100, figsize=(15, 10
     first_100_days = data.head(100)
     first_100_pred = full_rainfall_predictions[:, :100]
     
-    axes[1, 0].plot(first_100_days['PRCP'].values, 'b-', label='Observed', alpha=0.7)
-    axes[1, 0].plot(np.mean(first_100_pred, axis=0), 'r-', label='Predicted Mean', alpha=0.7)
-    axes[1, 0].fill_between(range(100), 
+    # Convert dates for proper x-axis
+    first_100_dates = pd.to_datetime(first_100_days['DATE'])
+    
+    axes[1, 0].plot(first_100_dates, first_100_days['PRCP'].values, 'b-', label='Observed', alpha=0.7)
+    axes[1, 0].plot(first_100_dates, np.mean(first_100_pred, axis=0), 'r-', label='Predicted Mean', alpha=0.7)
+    axes[1, 0].fill_between(first_100_dates, 
                            np.percentile(first_100_pred, 2.5, axis=0),
                            np.percentile(first_100_pred, 97.5, axis=0),
                            alpha=0.3, color='red', label='95% CI')
-    axes[1, 0].set_xlabel('Day')
     axes[1, 0].set_ylabel('Rainfall (mm)')
     axes[1, 0].set_title('Time Series: First 100 Days')
     axes[1, 0].legend()
+    
+    # Format x-axis with month labels
+    axes[1, 0].xaxis.set_major_locator(mdates.MonthLocator())
+    axes[1, 0].xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    axes[1, 0].xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
     
     # 4. Q-Q plot for rainfall amounts
     obs_quantiles = np.percentile(rainy_obs, np.linspace(0, 100, 100))
@@ -649,28 +698,28 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     # Create the plot
     fig, ax = plt.subplots(1, 1, figsize=(figsize[0], figsize[1]//2))
     
+    # Convert weeks to dates for proper x-axis
+    week_dates = _day_of_year_to_dates(week_centers)
+    
     # Weekly rain probability with confidence intervals
-    ax.fill_between(weeks, lower_ci, upper_ci, alpha=0.2, color='blue', 
+    ax.fill_between(week_dates, lower_ci, upper_ci, alpha=0.2, color='blue', 
                     label='95% CI (Expected Probability)')
-    ax.plot(weeks, mean_probs, 'b-', linewidth=2, label='Expected Probability')
-    ax.fill_between(weeks, pp_lower_ci, pp_upper_ci, alpha=0.3, color='green', 
+    ax.plot(week_dates, mean_probs, 'b-', linewidth=2, label='Expected Probability')
+    ax.fill_between(week_dates, pp_lower_ci, pp_upper_ci, alpha=0.3, color='green', 
                     label='95% CI (Posterior Predictive)')
-    ax.plot(weeks, pp_mean, 'g--', linewidth=2, label='Posterior Predictive Mean')
-    ax.scatter(weeks, observed_weekly_probs_full, color='red', s=30, alpha=0.7, 
+    ax.plot(week_dates, pp_mean, 'g--', linewidth=2, label='Posterior Predictive Mean')
+    ax.scatter(week_dates, observed_weekly_probs_full, color='red', s=30, alpha=0.7, 
                label='Observed Probability', zorder=5)
-    ax.set_xlabel('Week of Year')
     ax.set_ylabel('Probability of Any Rain')
     ax.set_title('Weekly Rain Probability Throughout the Year', fontsize=14, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
     
-    # Add month labels on x-axis
-    month_positions = [1, 5, 9, 13, 17, 22, 26, 30, 35, 39, 43, 47, 52]
-    month_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan']
-    ax.set_xticks(month_positions)
-    ax.set_xticklabels(month_labels)
+    # Format x-axis with month labels
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
     
     plt.tight_layout()
     plt.show()
@@ -799,47 +848,66 @@ def plot_hierarchical_posterior_predictive_checks(trace, data, n_samples=100, fi
     # Create plots
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     
+    # Convert unique days to dates for proper x-axis
+    unique_dates = _day_of_year_to_dates(unique_days)
+    
     # 1. Rain probability comparison
     ax1 = axes[0, 0]
-    ax1.plot(unique_days, pp_rain_mean, 'b-', linewidth=2, label='Posterior Predictive Mean')
-    ax1.fill_between(unique_days, pp_rain_lower, pp_rain_upper, alpha=0.3, color='blue', label='95% CI')
-    ax1.scatter(unique_days, observed_rain_probs, color='red', alpha=0.6, s=20, label='Observed')
-    ax1.set_xlabel('Day of Year')
+    ax1.plot(unique_dates, pp_rain_mean, 'b-', linewidth=2, label='Posterior Predictive Mean')
+    ax1.fill_between(unique_dates, pp_rain_lower, pp_rain_upper, alpha=0.3, color='blue', label='95% CI')
+    ax1.scatter(unique_dates, observed_rain_probs, color='red', alpha=0.6, s=20, label='Observed')
     ax1.set_ylabel('Rain Probability')
     ax1.set_title('Rain Probability: Observed vs Posterior Predictive')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
+    # Format x-axis with month labels
+    ax1.xaxis.set_major_locator(mdates.MonthLocator())
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax1.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
+    
     # 2. Rainfall amount comparison
     ax2 = axes[0, 1]
-    ax2.plot(unique_days, pp_amount_mean, 'g-', linewidth=2, label='Posterior Predictive Mean')
-    ax2.fill_between(unique_days, pp_amount_lower, pp_amount_upper, alpha=0.3, color='green', label='95% CI')
-    ax2.scatter(unique_days, observed_rainfall_amounts, color='red', alpha=0.6, s=20, label='Observed')
-    ax2.set_xlabel('Day of Year')
+    ax2.plot(unique_dates, pp_amount_mean, 'g-', linewidth=2, label='Posterior Predictive Mean')
+    ax2.fill_between(unique_dates, pp_amount_lower, pp_amount_upper, alpha=0.3, color='green', label='95% CI')
+    ax2.scatter(unique_dates, observed_rainfall_amounts, color='red', alpha=0.6, s=20, label='Observed')
     ax2.set_ylabel('Expected Rainfall (mm)')
     ax2.set_title('Rainfall Amount: Observed vs Posterior Predictive')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
+    # Format x-axis with month labels
+    ax2.xaxis.set_major_locator(mdates.MonthLocator())
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax2.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
+    
     # 3. Residuals for rain probability
     ax3 = axes[1, 0]
     rain_residuals = observed_rain_probs - pp_rain_mean
-    ax3.scatter(unique_days, rain_residuals, alpha=0.6, s=20)
+    ax3.scatter(unique_dates, rain_residuals, alpha=0.6, s=20)
     ax3.axhline(y=0, color='red', linestyle='--', alpha=0.7)
-    ax3.set_xlabel('Day of Year')
     ax3.set_ylabel('Residuals (Observed - Predicted)')
     ax3.set_title('Rain Probability Residuals')
     ax3.grid(True, alpha=0.3)
     
+    # Format x-axis with month labels
+    ax3.xaxis.set_major_locator(mdates.MonthLocator())
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax3.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
+    
     # 4. Residuals for rainfall amount
     ax4 = axes[1, 1]
     amount_residuals = observed_rainfall_amounts - pp_amount_mean
-    ax4.scatter(unique_days, amount_residuals, alpha=0.6, s=20)
+    ax4.scatter(unique_dates, amount_residuals, alpha=0.6, s=20)
     ax4.axhline(y=0, color='red', linestyle='--', alpha=0.7)
-    ax4.set_xlabel('Day of Year')
     ax4.set_ylabel('Residuals (Observed - Predicted)')
     ax4.set_title('Rainfall Amount Residuals')
     ax4.grid(True, alpha=0.3)
+    
+    # Format x-axis with month labels
+    ax4.xaxis.set_major_locator(mdates.MonthLocator())
+    ax4.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax4.xaxis.set_minor_locator(mdates.MonthLocator(bymonthday=15))
     
     plt.tight_layout()
     plt.show()

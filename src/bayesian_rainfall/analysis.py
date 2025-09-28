@@ -10,6 +10,7 @@ import seaborn as sns
 from scipy import stats
 from datetime import datetime
 import pymc as pm
+import matplotlib.dates as mdates
 
 
 def _parse_date_input(date_input):
@@ -1220,26 +1221,35 @@ def plot_year_effects(trace, data):
     rain_stds = year_rain_effects.std(axis=(0, 1))
     rain_cis = np.percentile(year_rain_effects, [2.5, 97.5], axis=(0, 1))
     
-    axes[0, 0].errorbar(years, rain_means, yerr=rain_stds, fmt='o-', capsize=5, capthick=2)
-    axes[0, 0].fill_between(years, rain_cis[0], rain_cis[1], alpha=0.3)
+    # Convert years to datetime for proper x-axis
+    year_dates = pd.to_datetime(years, format='%Y')
+    
+    axes[0, 0].errorbar(year_dates, rain_means, yerr=rain_stds, fmt='o-', capsize=5, capthick=2)
+    axes[0, 0].fill_between(year_dates, rain_cis[0], rain_cis[1], alpha=0.3)
     axes[0, 0].axhline(0, color='red', linestyle='--', alpha=0.7)
-    axes[0, 0].set_xlabel('Year')
     axes[0, 0].set_ylabel('Year Effect (logit scale)')
     axes[0, 0].set_title('Rain Probability Year Effects')
     axes[0, 0].grid(True, alpha=0.3)
+    
+    # Format x-axis with year labels
+    axes[0, 0].xaxis.set_major_locator(mdates.YearLocator())
+    axes[0, 0].xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
     
     # Rainfall amount year effects
     amount_means = year_amount_effects.mean(axis=(0, 1))
     amount_stds = year_amount_effects.std(axis=(0, 1))
     amount_cis = np.percentile(year_amount_effects, [2.5, 97.5], axis=(0, 1))
     
-    axes[0, 1].errorbar(years, amount_means, yerr=amount_stds, fmt='o-', capsize=5, capthick=2, color='green')
-    axes[0, 1].fill_between(years, amount_cis[0], amount_cis[1], alpha=0.3, color='green')
+    axes[0, 1].errorbar(year_dates, amount_means, yerr=amount_stds, fmt='o-', capsize=5, capthick=2, color='green')
+    axes[0, 1].fill_between(year_dates, amount_cis[0], amount_cis[1], alpha=0.3, color='green')
     axes[0, 1].axhline(0, color='red', linestyle='--', alpha=0.7)
-    axes[0, 1].set_xlabel('Year')
     axes[0, 1].set_ylabel('Year Effect (log scale)')
     axes[0, 1].set_title('Rainfall Amount Year Effects')
     axes[0, 1].grid(True, alpha=0.3)
+    
+    # Format x-axis with year labels
+    axes[0, 1].xaxis.set_major_locator(mdates.YearLocator())
+    axes[0, 1].xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
     
     # Observed vs predicted rain frequency by year
     observed_rain_freq = []
@@ -1270,7 +1280,6 @@ def plot_year_effects(trace, data):
     
     axes[1, 1].bar(x - width/2, rain_effect_magnitudes, width, label='Rain Probability', alpha=0.7)
     axes[1, 1].bar(x + width/2, amount_effect_magnitudes, width, label='Rainfall Amount', alpha=0.7)
-    axes[1, 1].set_xlabel('Year')
     axes[1, 1].set_ylabel('Effect Magnitude')
     axes[1, 1].set_title('Year Effect Magnitudes')
     axes[1, 1].set_xticks(x)
