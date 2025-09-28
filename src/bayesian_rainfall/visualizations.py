@@ -56,6 +56,8 @@ def _sample_observed_rain_frequencies(rain_probs, n_years=6):
     This function models the sampling uncertainty from observing only n_years of data per day,
     using a Beta distribution to approximate the sampling distribution of the sample proportion.
     
+    Vectorized implementation for much better performance.
+    
     Parameters:
     -----------
     rain_probs : array (n_days, n_samples)
@@ -68,30 +70,35 @@ def _sample_observed_rain_frequencies(rain_probs, n_years=6):
     observed_frequencies : array (n_days, n_samples)
         Sampled observed frequencies including sampling uncertainty
     """
-    n_days, n_samples = rain_probs.shape
+    # Vectorized calculation of Beta parameters
+    # For observed frequency X/n where X ~ Binomial(n, p_i):
+    # Mean = p_i, Variance = p_i * (1 - p_i) / n
+    mu = rain_probs  # Mean is the true probability
+    sigma_sq = rain_probs * (1 - rain_probs) / n_years  # Variance
+    
+    # Calculate scale factor for Beta distribution
+    # scale_factor = n_years - 1 (simplified from the method of moments)
+    scale_factor = n_years - 1
+    
+    # Calculate Beta parameters
+    alpha = rain_probs * scale_factor
+    beta = (1 - rain_probs) * scale_factor
+    
+    # Create masks for valid Beta parameters
+    valid_mask = (rain_probs > 0) & (rain_probs < 1) & (sigma_sq > 0) & (scale_factor > 0)
+    
+    # Initialize output array
     observed_frequencies = np.zeros_like(rain_probs)
     
-    for d in range(n_days):
-        for i in range(n_samples):
-            p_i = rain_probs[d, i]
-            
-            # Calculate Beta parameters to match sampling distribution
-            # For observed frequency X/n where X ~ Binomial(n, p_i):
-            # Mean = p_i, Variance = p_i * (1 - p_i) / n
-            mu = p_i
-            sigma_sq = p_i * (1 - p_i) / n_years
-            
-            if 0 < p_i < 1 and sigma_sq > 0:
-                # Method of moments: match mean and variance
-                scale_factor = mu * (1 - mu) / sigma_sq - 1
-                if scale_factor > 0:  # Valid Beta parameters
-                    alpha = mu * scale_factor
-                    beta = (1 - mu) * scale_factor
-                    observed_frequencies[d, i] = np.random.beta(alpha, beta)
-                else:
-                    observed_frequencies[d, i] = p_i  # Fallback to mean
-            else:
-                observed_frequencies[d, i] = p_i  # Edge case fallback
+    # Sample from Beta distribution for valid parameters
+    if np.any(valid_mask):
+        observed_frequencies[valid_mask] = np.random.beta(
+            alpha[valid_mask], 
+            beta[valid_mask]
+        )
+    
+    # For invalid parameters, use the original probabilities as fallback
+    observed_frequencies[~valid_mask] = rain_probs[~valid_mask]
     
     return observed_frequencies
 
