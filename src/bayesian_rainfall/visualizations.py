@@ -75,39 +75,37 @@ def plot_combined_predictions(trace, data, ci_level=0.95, figsize=(14, 10)):
     rain_prob_lower = np.percentile(rain_probs, lower_percentile, axis=1)
     rain_prob_upper = np.percentile(rain_probs, upper_percentile, axis=1)
     
-    # Generate posterior predictive samples for rain indicators
-    n_samples = 1000
-    posterior_predictive_rain = []
-    for i in range(min(n_samples, rain_probs.shape[1])):
-        rain_indicators = np.random.binomial(1, rain_probs[:, i])
-        posterior_predictive_rain.append(rain_indicators)
+    # Generate posterior predictive samples using direct evaluation
+    n_samples = rain_probs.shape[1]
+    rain_indicators = np.zeros((n_samples, 365))
+    rainfall_amounts = np.zeros((n_samples, 365))
     
-    posterior_predictive_rain = np.array(posterior_predictive_rain)
-    pp_rain_mean = np.mean(posterior_predictive_rain, axis=0)
-    pp_rain_lower = np.percentile(posterior_predictive_rain, lower_percentile, axis=0)
-    pp_rain_upper = np.percentile(posterior_predictive_rain, upper_percentile, axis=0)
+    for i in range(n_samples):
+        for j, day in enumerate(days_of_year):
+            # Sample rain indicator
+            rain_indicator = np.random.binomial(1, rain_probs[j, i])
+            rain_indicators[i, j] = rain_indicator
+            
+            # Sample rainfall amount if it rains
+            if rain_indicator == 1:
+                rainfall = np.random.gamma(alpha_amounts[j, i], expected_amounts[j, i] / alpha_amounts[j, i])
+            else:
+                rainfall = 0
+            rainfall_amounts[i, j] = rainfall
     
-    # Calculate rainfall amounts
+    # Calculate posterior predictive statistics
+    pp_rain_mean = np.mean(rain_indicators, axis=0)  # Shape: (365,)
+    pp_rain_lower = np.percentile(rain_indicators, lower_percentile, axis=0)
+    pp_rain_upper = np.percentile(rain_indicators, upper_percentile, axis=0)
+    
+    pp_amounts_mean = np.mean(rainfall_amounts, axis=0)  # Shape: (365,)
+    pp_amounts_lower = np.percentile(rainfall_amounts, lower_percentile, axis=0)
+    pp_amounts_upper = np.percentile(rainfall_amounts, upper_percentile, axis=0)
+    
+    # Calculate expected values (parameter uncertainty)
     rainfall_mean = np.mean(expected_amounts, axis=1)
-    rainfall_lower = np.percentile(expected_amounts, 2.5, axis=1)
-    rainfall_upper = np.percentile(expected_amounts, 97.5, axis=1)
-    
-    # Generate posterior predictive samples for rainfall amounts
-    posterior_predictive_amounts = []
-    for i in range(min(n_samples, rain_probs.shape[1])):
-        rain_indicators = np.random.binomial(1, rain_probs[:, i])
-        rainfall = np.zeros(len(days_of_year))
-        rainy_mask = rain_indicators == 1
-        if np.sum(rainy_mask) > 0:
-            rainfall[rainy_mask] = np.random.gamma(alpha_amounts[rainy_mask, i], 
-                                                 expected_amounts[rainy_mask, i] / alpha_amounts[rainy_mask, i])
-        
-        posterior_predictive_amounts.append(rainfall)
-    
-    posterior_predictive_amounts = np.array(posterior_predictive_amounts)
-    pp_amounts_mean = np.mean(posterior_predictive_amounts, axis=0)
-    pp_amounts_lower = np.percentile(posterior_predictive_amounts, 2.5, axis=0)
-    pp_amounts_upper = np.percentile(posterior_predictive_amounts, 97.5, axis=0)
+    rainfall_lower = np.percentile(expected_amounts, lower_percentile, axis=1)
+    rainfall_upper = np.percentile(expected_amounts, upper_percentile, axis=1)
     
     # Get observed data
     observed_rain_prob = data.groupby('day_of_year')['PRCP'].apply(lambda x: (x > 0).mean()).values
@@ -151,7 +149,7 @@ def plot_combined_predictions(trace, data, ci_level=0.95, figsize=(14, 10)):
     plt.show()
 
 
-def plot_posterior_predictive_checks(trace, model, data, n_samples=100, figsize=(15, 10)):
+def plot_posterior_predictive_checks(trace, data, n_samples=100, figsize=(15, 10)):
     """
     Plot posterior predictive checks comparing observed vs predicted data.
     
@@ -159,8 +157,6 @@ def plot_posterior_predictive_checks(trace, model, data, n_samples=100, figsize=
     -----------
     trace : arviz.InferenceData
         MCMC trace from sampling
-    model : pymc.Model
-        PyMC model
     data : pandas.DataFrame
         Weather data with columns 'PRCP' and 'day_of_year'
     n_samples : int, optional
@@ -168,27 +164,29 @@ def plot_posterior_predictive_checks(trace, model, data, n_samples=100, figsize=
     figsize : tuple, optional
         Figure size (width, height)
     """
-    # Generate posterior predictive samples
-    with model:
-        posterior_predictive = pm.sample_posterior_predictive(trace, var_names=['rain_indicator'])
-    
-    predicted_rain_indicator = posterior_predictive.posterior_predictive.rain_indicator.values
-    
-    # Generate full rainfall predictions
+    # Generate full rainfall predictions using direct evaluation
     full_rainfall_predictions = []
     
-    for i in range(min(n_samples, predicted_rain_indicator.shape[0] * predicted_rain_indicator.shape[1])):
-        chain_idx = i // predicted_rain_indicator.shape[1]
-        sample_idx = i % predicted_rain_indicator.shape[1]
-        
+    # Get parameter samples
+    a_rain_samples = trace.posterior.a_rain.values.flatten()
+    b_rain_samples = trace.posterior.b_rain.values.flatten()
+    c_rain_samples = trace.posterior.c_rain.values.flatten()
+    a_amount_samples = trace.posterior.a_amount.values.flatten()
+    b_amount_samples = trace.posterior.b_amount.values.flatten()
+    c_amount_samples = trace.posterior.c_amount.values.flatten()
+    alpha_amount_samples = trace.posterior.alpha_amount.values.flatten()
+    
+    n_samples = min(n_samples, len(a_rain_samples))
+    
+    for i in range(n_samples):
         # Get parameters for this sample
-        a_rain = trace.posterior.a_rain.values[chain_idx, sample_idx]
-        b_rain = trace.posterior.b_rain.values[chain_idx, sample_idx]
-        c_rain = trace.posterior.c_rain.values[chain_idx, sample_idx]
-        a_amount = trace.posterior.a_amount.values[chain_idx, sample_idx]
-        b_amount = trace.posterior.b_amount.values[chain_idx, sample_idx]
-        c_amount = trace.posterior.c_amount.values[chain_idx, sample_idx]
-        alpha_amount = trace.posterior.alpha_amount.values[chain_idx, sample_idx]
+        a_rain = a_rain_samples[i]
+        b_rain = b_rain_samples[i]
+        c_rain = c_rain_samples[i]
+        a_amount = a_amount_samples[i]
+        b_amount = b_amount_samples[i]
+        c_amount = c_amount_samples[i]
+        alpha_amount = alpha_amount_samples[i]
         
         # Calculate rain probabilities
         day_of_year = data['day_of_year'].values

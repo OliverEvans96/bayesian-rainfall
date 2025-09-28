@@ -8,6 +8,7 @@ import pandas as pd
 import arviz as az
 from unittest.mock import Mock, patch
 from datetime import datetime
+import pymc as pm
 
 from bayesian_rainfall.analysis import (
     _parse_date_input,
@@ -665,7 +666,11 @@ class TestIntegration:
         # Create and sample model
         model = create_rainfall_model(data)
         trace = sample_model(model, draws=100, tune=100)
-        
+
+        # Test posterior predictive sampling using our simplified function
+        from bayesian_rainfall.analysis import sample_posterior_predictive_for_day
+        rain_indicators, rainfall_amounts = sample_posterior_predictive_for_day(trace, 15, n_samples=50)
+
         # Test analyze_single_day with real trace
         with patch('matplotlib.pyplot.show'):
             result = analyze_single_day(trace, data, 15, show_plots=False)
@@ -683,7 +688,6 @@ class TestIntegration:
             result = calculate_rainfall_interval_probability(trace, 15, n_samples=50)
             assert result is not None
             assert 0 <= result['probability'] <= 1
-
 
 if __name__ == "__main__":
     pytest.main([__file__])

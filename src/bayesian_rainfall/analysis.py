@@ -111,6 +111,52 @@ def _evaluate_model_for_day(trace, day_of_year):
     return rain_probs, expected_amounts, alpha_amount_samples
 
 
+def sample_posterior_predictive_for_day(trace, day_of_year, n_samples=1000):
+    """
+    Sample posterior predictive for a specific day using direct evaluation.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from sampling
+    day_of_year : int
+        Day of year (1-365)
+    n_samples : int
+        Number of posterior predictive samples to generate
+    
+    Returns:
+    --------
+    tuple : (rain_indicators, rainfall_amounts)
+        Arrays of rain indicators and rainfall amounts
+    """
+    # Use helper function to get model predictions
+    rain_probs, expected_amounts, alpha_amounts = _evaluate_model_for_day(trace, day_of_year)
+    
+    # Limit to requested number of samples
+    n_samples = min(n_samples, len(rain_probs))
+    rain_probs = rain_probs[:n_samples]
+    expected_amounts = expected_amounts[:n_samples]
+    alpha_amounts = alpha_amounts[:n_samples]
+    
+    # Generate rainfall samples
+    rain_indicators = []
+    rainfall_amounts = []
+    
+    for i, (p_rain, mu_amount, alpha_amount) in enumerate(zip(rain_probs, expected_amounts, alpha_amounts)):
+        # Sample rain indicator
+        rain_indicator = np.random.binomial(1, p_rain)
+        rain_indicators.append(rain_indicator)
+        
+        # Sample rainfall amount if it rains
+        if rain_indicator == 1:
+            rainfall = np.random.gamma(alpha_amount, mu_amount / alpha_amount)
+        else:
+            rainfall = 0
+        rainfall_amounts.append(rainfall)
+    
+    return np.array(rain_indicators), np.array(rainfall_amounts)
+
+
 def print_model_summary(trace, data, param_names=None):
     """
     Print a comprehensive summary of the model results including statistics,
