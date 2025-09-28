@@ -1,4 +1,4 @@
-from bayesian_rainfall.model import load_data, create_rainfall_model
+from bayesian_rainfall.model import load_data, create_model
 
 def test_data_loading():
     """Test that data loading works correctly."""
@@ -19,7 +19,7 @@ def test_data_loading():
 def test_model_creation():
     """Test that the model can be created without errors."""
     data = load_data("data/noaa_historical_weather_eugene_or_2019-2024.csv")
-    model = create_rainfall_model(data)
+    model = create_model(data)
     
     # Check that the model has the expected variables
     expected_vars = ['a_rain', 'b_rain', 'c_rain', 'p_rain', 'rain_indicator', 

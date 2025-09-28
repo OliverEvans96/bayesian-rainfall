@@ -68,26 +68,23 @@ def _parse_date_input(date_input):
     return day_of_year, day_name
 
 
-def _evaluate_model_for_day(trace, day_of_year):
+def _evaluate_model_for_day(trace, day_of_year, year=None):
     """
-    Helper function to evaluate model for a specific day using posterior samples.
-
-    This function centralizes the model evaluation logic that was previously duplicated
-    across multiple functions. While it doesn't use PyMC's eval_in_model (because the
-    model wasn't designed for arbitrary new data), it provides a clean, centralized
-    way to make predictions for new days using the posterior samples.
+    Helper function to evaluate hierarchical model for a specific day using posterior samples.
 
     Parameters:
     -----------
     trace : arviz.InferenceData
-        MCMC trace from sampling
+        MCMC trace from hierarchical model sampling
     day_of_year : int
         Day of year (1-365)
+    year : int, optional
+        Year for year-specific prediction. If None, uses average year effects.
 
     Returns:
     --------
     tuple : (rain_probs, expected_amounts, alpha_amounts)
-        Arrays of rain probabilities, expected rainfall amounts, and alpha parameters for all posterior samples
+        Arrays of rain probabilities, expected rainfall amounts, and alpha parameters
     """
     # Get the number of harmonics from the trace
     n_harmonics = trace.posterior.a_rain.shape[-1]
@@ -106,18 +103,37 @@ def _evaluate_model_for_day(trace, day_of_year):
     c_amount_samples = trace.posterior.c_amount.values.flatten()  # Shape: (n_samples,)
     alpha_amount_samples = trace.posterior.alpha_amount.values.flatten()  # Shape: (n_samples,)
     
+    # Get year effects
+    year_rain_effects = trace.posterior.year_rain_effects.values  # Shape: (chains, draws, n_years)
+    year_amount_effects = trace.posterior.year_amount_effects.values
+    
+    # Get unique years from the model
+    unique_years = trace.posterior.year_rain_effects.coords['year'].values
+    
+    # Handle year selection
+    if year is not None:
+        if year not in unique_years:
+            raise ValueError(f"Year {year} not found in model. Available years: {unique_years}")
+        year_idx = np.where(unique_years == year)[0][0]
+        year_rain_effect = year_rain_effects[:, :, year_idx].flatten()  # Shape: (n_samples,)
+        year_amount_effect = year_amount_effects[:, :, year_idx].flatten()  # Shape: (n_samples,)
+    else:
+        # Use average year effects (all zeros since they're centered)
+        year_rain_effect = np.zeros_like(c_rain_samples)
+        year_amount_effect = np.zeros_like(c_amount_samples)
+    
     # Calculate rain probabilities for all samples (vectorized)
     # a_rain_samples: (n_samples, n_harmonics), day_sin: (n_harmonics,)
     # Result: (n_samples,) - sum over harmonics dimension
-    logit_p = c_rain_samples + np.sum(a_rain_samples * day_sin + b_rain_samples * day_cos, axis=1)
+    logit_p = c_rain_samples + np.sum(a_rain_samples * day_sin + b_rain_samples * day_cos, axis=1) + year_rain_effect
     rain_probs = 1 / (1 + np.exp(-logit_p))
     
     # Calculate expected rainfall amounts (vectorized)
     # a_amount_samples: (n_samples, n_harmonics), day_sin: (n_harmonics,)
     # Result: (n_samples,) - sum over harmonics dimension
-    log_mu_amount = c_amount_samples + np.sum(a_amount_samples * day_sin + b_amount_samples * day_cos, axis=1)
+    log_mu_amount = c_amount_samples + np.sum(a_amount_samples * day_sin + b_amount_samples * day_cos, axis=1) + year_amount_effect
     expected_amounts = np.exp(log_mu_amount)
-        
+    
     return rain_probs, expected_amounts, alpha_amount_samples
 
 
@@ -883,3 +899,674 @@ def print_simple_daily_rainfall_analysis(trace, date_input="01/15"):
     print(f"Sum: {total:.3f}")
     
     print("\nConfidence intervals reflect uncertainty in the probability estimates due to parameter uncertainty.")
+
+
+# =============================================================================
+# YEAR-SPECIFIC ANALYSIS FUNCTIONS FOR HIERARCHICAL MODELS
+# =============================================================================
+
+def _evaluate_hierarchical_model_for_day(trace, day_of_year, year=None):
+    """
+    Helper function to evaluate hierarchical model for a specific day and year.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from hierarchical model sampling
+    day_of_year : int
+        Day of year (1-365)
+    year : int, optional
+        Year for year-specific prediction. If None, uses average year effects.
+    
+    Returns:
+    --------
+    tuple : (rain_probs, expected_amounts, alpha_amounts)
+        Arrays of rain probabilities, expected rainfall amounts, and alpha parameters
+    """
+    # Get the number of harmonics from the trace
+    n_harmonics = trace.posterior.a_rain.shape[-1]
+    
+    # Create harmonic features for the specific day (vectorized)
+    h_values = np.arange(1, n_harmonics + 1)  # Shape: (n_harmonics,)
+    day_sin = np.sin(2 * h_values * np.pi * day_of_year / 365.25)  # Shape: (n_harmonics,)
+    day_cos = np.cos(2 * h_values * np.pi * day_of_year / 365.25)  # Shape: (n_harmonics,)
+    
+    # Get parameter samples
+    a_rain = trace.posterior.a_rain.values  # Shape: (chains, draws, n_harmonics)
+    b_rain = trace.posterior.b_rain.values
+    c_rain = trace.posterior.c_rain.values  # Shape: (chains, draws)
+    
+    a_amount = trace.posterior.a_amount.values
+    b_amount = trace.posterior.b_amount.values
+    c_amount = trace.posterior.c_amount.values
+    
+    alpha_amount = trace.posterior.alpha_amount.values  # Shape: (chains, draws)
+    
+    # Get year effects
+    year_rain_effects = trace.posterior.year_rain_effects.values  # Shape: (chains, draws, n_years)
+    year_amount_effects = trace.posterior.year_amount_effects.values
+    
+    # Get unique years from the model
+    unique_years = trace.posterior.year_rain_effects.coords['year'].values
+    
+    # Handle year selection
+    if year is not None:
+        if year not in unique_years:
+            raise ValueError(f"Year {year} not found in model. Available years: {unique_years}")
+        year_idx = np.where(unique_years == year)[0][0]
+        year_rain_effect = year_rain_effects[:, :, year_idx]  # Shape: (chains, draws)
+        year_amount_effect = year_amount_effects[:, :, year_idx]
+    else:
+        # Use average year effects (all zeros since they're centered)
+        year_rain_effect = np.zeros_like(c_rain)
+        year_amount_effect = np.zeros_like(c_amount)
+    
+    # Calculate rain probability for all samples
+    # Reshape for broadcasting: (chains, draws, n_harmonics) @ (n_harmonics,) -> (chains, draws)
+    harmonic_rain_contribution = np.sum(
+        a_rain * day_sin[None, None, :] + b_rain * day_cos[None, None, :], 
+        axis=-1
+    )
+    
+    logit_p = c_rain + harmonic_rain_contribution + year_rain_effect
+    rain_probs = 1 / (1 + np.exp(-logit_p))  # Sigmoid
+    
+    # Calculate expected rainfall amount for all samples
+    harmonic_amount_contribution = np.sum(
+        a_amount * day_sin[None, None, :] + b_amount * day_cos[None, None, :], 
+        axis=-1
+    )
+    
+    log_mu_amount = c_amount + harmonic_amount_contribution + year_amount_effect
+    expected_amounts = np.exp(log_mu_amount)
+    
+    # Flatten to 1D array
+    rain_probs = rain_probs.flatten()
+    expected_amounts = expected_amounts.flatten()
+    alpha_amounts = alpha_amount.flatten()
+    
+    return rain_probs, expected_amounts, alpha_amounts
+
+
+
+
+def analyze_single_day_hierarchical(trace, data, date_input, year=None, show_plots=True):
+    """
+    Comprehensive analysis for a specific day using hierarchical model with year effects.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from hierarchical model
+    data : pd.DataFrame
+        Original data (for comparison)
+    date_input : int, str, or tuple
+        Day specification (see _parse_date_input for formats)
+    year : int, optional
+        Year for year-specific prediction. If None, uses average year effects.
+    show_plots : bool, default=True
+        Whether to display plots
+        
+    Returns:
+    --------
+    dict : Analysis results
+    """
+    day_of_year, day_name = _parse_date_input(date_input)
+    
+    # Get model predictions
+    rain_probs, expected_amounts, alpha_amounts = _evaluate_hierarchical_model_for_day(trace, day_of_year, year)
+    
+    # Calculate statistics
+    rain_prob_mean = rain_probs.mean()
+    rain_prob_std = rain_probs.std()
+    rain_prob_ci = np.percentile(rain_probs, [2.5, 97.5])
+    
+    expected_amount_mean = expected_amounts.mean()
+    expected_amount_std = expected_amounts.std()
+    expected_amount_ci = np.percentile(expected_amounts, [2.5, 97.5])
+    
+    # Get observed data for this day
+    day_data = data[data['day_of_year'] == day_of_year]
+    if year is not None:
+        day_data = day_data[day_data['year'] == year]
+    
+    observed_rain_freq = day_data['PRCP'].gt(0).mean() if len(day_data) > 0 else np.nan
+    observed_mean_amount = day_data[day_data['PRCP'] > 0]['PRCP'].mean() if len(day_data) > 0 else np.nan
+    
+    # Print results
+    year_str = f" for {year}" if year is not None else " (average year effects)"
+    print(f"HIERARCHICAL MODEL ANALYSIS: {day_name}{year_str}")
+    print("=" * 60)
+    print(f"Rain Probability: {rain_prob_mean:.3f} ± {rain_prob_std:.3f}")
+    print(f"95% CI: [{rain_prob_ci[0]:.3f}, {rain_prob_ci[1]:.3f}]")
+    print(f"Expected Amount: {expected_amount_mean:.2f} ± {expected_amount_std:.2f} mm")
+    print(f"95% CI: [{expected_amount_ci[0]:.2f}, {expected_amount_ci[1]:.2f}] mm")
+    
+    if not np.isnan(observed_rain_freq):
+        print(f"Observed Rain Frequency: {observed_rain_freq:.3f}")
+    if not np.isnan(observed_mean_amount):
+        print(f"Observed Mean Amount: {observed_mean_amount:.2f} mm")
+    
+    # Create plots if requested
+    if show_plots:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig.suptitle(f"Hierarchical Model Analysis: {day_name}{year_str}", fontsize=14)
+        
+        # Rain probability distribution
+        axes[0, 0].hist(rain_probs, bins=50, alpha=0.7, density=True, color='skyblue', edgecolor='black')
+        axes[0, 0].axvline(rain_prob_mean, color='red', linestyle='--', label=f'Mean: {rain_prob_mean:.3f}')
+        axes[0, 0].axvline(rain_prob_ci[0], color='orange', linestyle=':', alpha=0.7, label='95% CI')
+        axes[0, 0].axvline(rain_prob_ci[1], color='orange', linestyle=':', alpha=0.7)
+        if not np.isnan(observed_rain_freq):
+            axes[0, 0].axvline(observed_rain_freq, color='green', linestyle='-', linewidth=2, label=f'Observed: {observed_rain_freq:.3f}')
+        axes[0, 0].set_xlabel('Rain Probability')
+        axes[0, 0].set_ylabel('Density')
+        axes[0, 0].set_title('Rain Probability Distribution')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Expected amount distribution
+        axes[0, 1].hist(expected_amounts, bins=50, alpha=0.7, density=True, color='lightgreen', edgecolor='black')
+        axes[0, 1].axvline(expected_amount_mean, color='red', linestyle='--', label=f'Mean: {expected_amount_mean:.2f}')
+        axes[0, 1].axvline(expected_amount_ci[0], color='orange', linestyle=':', alpha=0.7, label='95% CI')
+        axes[0, 1].axvline(expected_amount_ci[1], color='orange', linestyle=':', alpha=0.7)
+        if not np.isnan(observed_mean_amount):
+            axes[0, 1].axvline(observed_mean_amount, color='green', linestyle='-', linewidth=2, label=f'Observed: {observed_mean_amount:.2f}')
+        axes[0, 1].set_xlabel('Expected Amount (mm)')
+        axes[0, 1].set_ylabel('Density')
+        axes[0, 1].set_title('Expected Rainfall Amount Distribution')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Alpha parameter distribution
+        axes[1, 0].hist(alpha_amounts, bins=50, alpha=0.7, density=True, color='lightcoral', edgecolor='black')
+        axes[1, 0].axvline(alpha_amounts.mean(), color='red', linestyle='--', label=f'Mean: {alpha_amounts.mean():.2f}')
+        axes[1, 0].set_xlabel('Alpha Parameter')
+        axes[1, 0].set_ylabel('Density')
+        axes[1, 0].set_title('Gamma Shape Parameter (Alpha)')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Year effects (if available)
+        if hasattr(trace.posterior, 'year_rain_effects'):
+            year_effects = trace.posterior.year_rain_effects.values.flatten()
+            axes[1, 1].hist(year_effects, bins=30, alpha=0.7, density=True, color='plum', edgecolor='black')
+            axes[1, 1].axvline(0, color='red', linestyle='--', label='Zero (average)')
+            if year is not None:
+                year_idx = np.where(trace.posterior.year_rain_effects.coords['year'].values == year)[0][0]
+                specific_year_effect = trace.posterior.year_rain_effects.values[:, :, year_idx].flatten()
+                axes[1, 1].axvline(specific_year_effect.mean(), color='green', linestyle='-', linewidth=2, label=f'Year {year}: {specific_year_effect.mean():.3f}')
+            axes[1, 1].set_xlabel('Year Effect')
+            axes[1, 1].set_ylabel('Density')
+            axes[1, 1].set_title('Year Effects Distribution')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True, alpha=0.3)
+        else:
+            axes[1, 1].text(0.5, 0.5, 'No year effects available', ha='center', va='center', transform=axes[1, 1].transAxes)
+            axes[1, 1].set_title('Year Effects')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return {
+        'day_of_year': day_of_year,
+        'day_name': day_name,
+        'year': year,
+        'rain_probability': {
+            'mean': rain_prob_mean,
+            'std': rain_prob_std,
+            'ci_lower': rain_prob_ci[0],
+            'ci_upper': rain_prob_ci[1]
+        },
+        'expected_amount': {
+            'mean': expected_amount_mean,
+            'std': expected_amount_std,
+            'ci_lower': expected_amount_ci[0],
+            'ci_upper': expected_amount_ci[1]
+        },
+        'observed': {
+            'rain_frequency': observed_rain_freq,
+            'mean_amount': observed_mean_amount
+        }
+    }
+
+
+def compare_years_for_day(trace, data, date_input, years=None):
+    """
+    Compare predictions for a specific day across different years.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from hierarchical model
+    data : pd.DataFrame
+        Original data
+    date_input : int, str, or tuple
+        Day specification
+    years : list of int, optional
+        Years to compare. If None, uses all available years.
+        
+    Returns:
+    --------
+    dict : Comparison results
+    """
+    day_of_year, day_name = _parse_date_input(date_input)
+    
+    if years is None:
+        years = trace.posterior.year_rain_effects.coords['year'].values
+    
+    results = {}
+    
+    print(f"YEAR COMPARISON FOR {day_name}")
+    print("=" * 50)
+    print(f"{'Year':<6} {'P(Rain)':<12} {'Expected (mm)':<15} {'Observed P(Rain)':<18} {'Observed Mean (mm)':<20}")
+    print("-" * 80)
+    
+    for year in years:
+        # Get predictions
+        rain_probs, expected_amounts, _ = _evaluate_hierarchical_model_for_day(trace, day_of_year, year)
+        
+        # Get observed data
+        year_data = data[(data['day_of_year'] == day_of_year) & (data['year'] == year)]
+        observed_rain_freq = year_data['PRCP'].gt(0).mean() if len(year_data) > 0 else np.nan
+        observed_mean_amount = year_data[year_data['PRCP'] > 0]['PRCP'].mean() if len(year_data) > 0 else np.nan
+        
+        # Store results
+        results[year] = {
+            'rain_probability': {
+                'mean': rain_probs.mean(),
+                'std': rain_probs.std()
+            },
+            'expected_amount': {
+                'mean': expected_amounts.mean(),
+                'std': expected_amounts.std()
+            },
+            'observed': {
+                'rain_frequency': observed_rain_freq,
+                'mean_amount': observed_mean_amount
+            }
+        }
+        
+        # Print results
+        obs_rain_str = f"{observed_rain_freq:.3f}" if not np.isnan(observed_rain_freq) else "N/A"
+        obs_amount_str = f"{observed_mean_amount:.2f}" if not np.isnan(observed_mean_amount) else "N/A"
+        
+        print(f"{year:<6} {rain_probs.mean():.3f}±{rain_probs.std():.3f}    {expected_amounts.mean():.2f}±{expected_amounts.std():.2f}      {obs_rain_str:<18} {obs_amount_str:<20}")
+    
+    return results
+
+
+def plot_year_effects(trace, data):
+    """
+    Plot year effects for both rain probability and rainfall amount.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from hierarchical model
+    data : pd.DataFrame
+        Original data
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('Year Effects Analysis', fontsize=16)
+    
+    # Get year effects
+    year_rain_effects = trace.posterior.year_rain_effects.values  # (chains, draws, n_years)
+    year_amount_effects = trace.posterior.year_amount_effects.values
+    years = trace.posterior.year_rain_effects.coords['year'].values
+    
+    # Rain probability year effects
+    rain_means = year_rain_effects.mean(axis=(0, 1))
+    rain_stds = year_rain_effects.std(axis=(0, 1))
+    rain_cis = np.percentile(year_rain_effects, [2.5, 97.5], axis=(0, 1))
+    
+    axes[0, 0].errorbar(years, rain_means, yerr=rain_stds, fmt='o-', capsize=5, capthick=2)
+    axes[0, 0].fill_between(years, rain_cis[0], rain_cis[1], alpha=0.3)
+    axes[0, 0].axhline(0, color='red', linestyle='--', alpha=0.7)
+    axes[0, 0].set_xlabel('Year')
+    axes[0, 0].set_ylabel('Year Effect (logit scale)')
+    axes[0, 0].set_title('Rain Probability Year Effects')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Rainfall amount year effects
+    amount_means = year_amount_effects.mean(axis=(0, 1))
+    amount_stds = year_amount_effects.std(axis=(0, 1))
+    amount_cis = np.percentile(year_amount_effects, [2.5, 97.5], axis=(0, 1))
+    
+    axes[0, 1].errorbar(years, amount_means, yerr=amount_stds, fmt='o-', capsize=5, capthick=2, color='green')
+    axes[0, 1].fill_between(years, amount_cis[0], amount_cis[1], alpha=0.3, color='green')
+    axes[0, 1].axhline(0, color='red', linestyle='--', alpha=0.7)
+    axes[0, 1].set_xlabel('Year')
+    axes[0, 1].set_ylabel('Year Effect (log scale)')
+    axes[0, 1].set_title('Rainfall Amount Year Effects')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Observed vs predicted rain frequency by year
+    observed_rain_freq = []
+    predicted_rain_freq = []
+    
+    for year in years:
+        year_data = data[data['year'] == year]
+        if len(year_data) > 0:
+            obs_freq = year_data['PRCP'].gt(0).mean()
+            # Use average year effects for prediction
+            pred_freq = 1 / (1 + np.exp(-year_rain_effects[:, :, years == year].mean()))
+            observed_rain_freq.append(obs_freq)
+            predicted_rain_freq.append(pred_freq)
+    
+    axes[1, 0].scatter(observed_rain_freq, predicted_rain_freq, s=100, alpha=0.7)
+    axes[1, 0].plot([0, 1], [0, 1], 'r--', alpha=0.7)
+    axes[1, 0].set_xlabel('Observed Rain Frequency')
+    axes[1, 0].set_ylabel('Predicted Rain Frequency')
+    axes[1, 0].set_title('Observed vs Predicted Rain Frequency')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Year effect magnitudes
+    rain_effect_magnitudes = np.abs(year_rain_effects).mean(axis=(0, 1))
+    amount_effect_magnitudes = np.abs(year_amount_effects).mean(axis=(0, 1))
+    
+    x = np.arange(len(years))
+    width = 0.35
+    
+    axes[1, 1].bar(x - width/2, rain_effect_magnitudes, width, label='Rain Probability', alpha=0.7)
+    axes[1, 1].bar(x + width/2, amount_effect_magnitudes, width, label='Rainfall Amount', alpha=0.7)
+    axes[1, 1].set_xlabel('Year')
+    axes[1, 1].set_ylabel('Effect Magnitude')
+    axes[1, 1].set_title('Year Effect Magnitudes')
+    axes[1, 1].set_xticks(x)
+    axes[1, 1].set_xticklabels(years)
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+
+# =============================================================================
+# HIERARCHICAL MODEL HELPER FUNCTIONS
+# =============================================================================
+
+def _get_year_effects_from_trace(trace):
+    """Extract and flatten year effects from trace."""
+    year_rain_effects = trace.posterior.year_rain_effects.values  # Shape: (chains, draws, n_years)
+    year_amount_effects = trace.posterior.year_amount_effects.values
+    
+    # Handle both real xarray coords and mock coords
+    try:
+        unique_years = trace.posterior.year_rain_effects.coords['year'].values
+    except AttributeError:
+        # Handle mock coords
+        unique_years = trace.posterior.year_rain_effects.coords['year']
+    
+    # Flatten to get all samples
+    year_rain_effects_flat = year_rain_effects.reshape(-1, len(unique_years))  # Shape: (n_samples, n_years)
+    year_amount_effects_flat = year_amount_effects.reshape(-1, len(unique_years))
+    
+    return year_rain_effects_flat, year_amount_effects_flat, unique_years
+
+
+def _apply_year_effects_to_predictions(rain_probs_base, expected_amounts_base, 
+                                     year_rain_effects_flat, year_amount_effects_flat, unique_years):
+    """Apply sampled year effects to base predictions."""
+    rain_probs_with_year = []
+    expected_amounts_with_year = []
+    
+    for i in range(len(rain_probs_base)):
+        # Sample a random year for this posterior sample
+        year_idx = np.random.choice(len(unique_years))
+        year_rain_effect = year_rain_effects_flat[i, year_idx]
+        year_amount_effect = year_amount_effects_flat[i, year_idx]
+        
+        # Apply year effects to base predictions
+        # For rain probability: add to logit
+        logit_p = np.log(rain_probs_base[i] / (1 - rain_probs_base[i])) + year_rain_effect
+        rain_prob_with_year = 1 / (1 + np.exp(-logit_p))
+        
+        # For rainfall amount: add to log scale
+        log_mu_amount = np.log(expected_amounts_base[i]) + year_amount_effect
+        expected_amount_with_year = np.exp(log_mu_amount)
+        
+        rain_probs_with_year.append(rain_prob_with_year)
+        expected_amounts_with_year.append(expected_amount_with_year)
+    
+    return np.array(rain_probs_with_year), np.array(expected_amounts_with_year)
+
+
+def _calculate_expected_values_with_year_effects(trace, days_of_year):
+    """Calculate expected values with sampled year effects (vectorized version)."""
+    # Get year effects from trace
+    year_rain_effects_flat, year_amount_effects_flat, unique_years = _get_year_effects_from_trace(trace)
+    n_samples = year_rain_effects_flat.shape[0]
+    n_days = len(days_of_year)
+    n_years = len(unique_years)
+    n_harmonics = trace.posterior.a_rain.values.shape[-1]
+    
+    # Get all parameters at once (flattened)
+    a_rain = trace.posterior.a_rain.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    b_rain = trace.posterior.b_rain.values.reshape(-1, n_harmonics)
+    c_rain = trace.posterior.c_rain.values.reshape(-1, 1)
+    a_amount = trace.posterior.a_amount.values.reshape(-1, n_harmonics)
+    b_amount = trace.posterior.b_amount.values.reshape(-1, n_harmonics)
+    c_amount = trace.posterior.c_amount.values.reshape(-1, 1)
+    alpha_amount = trace.posterior.alpha_amount.values.reshape(-1, 1)
+    
+    # Sample year effects for all posterior samples at once
+    year_indices = np.random.choice(n_years, size=n_samples)
+    year_rain_effects = year_rain_effects_flat[np.arange(n_samples), year_indices]  # Shape: (n_samples,)
+    year_amount_effects = year_amount_effects_flat[np.arange(n_samples), year_indices]  # Shape: (n_samples,)
+    
+    # Vectorize harmonic calculations for ALL days at once
+    # Shape: (n_harmonics, n_days)
+    h_values = np.arange(1, n_harmonics + 1)[:, None]  # Shape: (n_harmonics, 1)
+    day_values = days_of_year[None, :]  # Shape: (1, n_days)
+    
+    # Vectorized harmonic calculations
+    day_sin_all = np.sin(2 * h_values * np.pi * day_values / 365.25)  # Shape: (n_harmonics, n_days)
+    day_cos_all = np.cos(2 * h_values * np.pi * day_values / 365.25)  # Shape: (n_harmonics, n_days)
+    
+    # Vectorize rain probability calculations for ALL days at once
+    # Shape: (n_samples, n_days)
+    harmonic_rain_contrib = np.sum(a_rain[:, :, None] * day_sin_all[None, :, :] + 
+                                  b_rain[:, :, None] * day_cos_all[None, :, :], axis=1)
+    logit_p = c_rain + harmonic_rain_contrib + year_rain_effects[:, None]
+    rain_probs = 1 / (1 + np.exp(-logit_p))
+    
+    # Vectorize rainfall amount calculations for ALL days at once
+    # Shape: (n_samples, n_days)
+    harmonic_amount_contrib = np.sum(a_amount[:, :, None] * day_sin_all[None, :, :] + 
+                                   b_amount[:, :, None] * day_cos_all[None, :, :], axis=1)
+    log_mu_amount = c_amount + harmonic_amount_contrib + year_amount_effects[:, None]
+    expected_amounts = np.exp(log_mu_amount)
+    
+    # Alpha amounts are the same for all days (no harmonic dependence)
+    # Shape: (n_samples, n_days)
+    alpha_amounts = np.broadcast_to(alpha_amount, (n_samples, n_days))
+    
+    return rain_probs.T, expected_amounts.T, alpha_amounts.T  # Shape: (n_days, n_samples)
+
+
+def _get_all_year_predictions(trace, days_of_year, unique_years):
+    """Get year-specific predictions for all days and years at once (vectorized version)."""
+    # Get the actual number of samples from the trace (flattened)
+    n_samples = trace.posterior.a_rain.values.size // trace.posterior.a_rain.values.shape[-1]
+    n_days = len(days_of_year)
+    n_years = len(unique_years)
+    n_harmonics = trace.posterior.a_rain.values.shape[-1]
+    
+    # Get all parameters at once (flattened)
+    a_rain = trace.posterior.a_rain.values.reshape(-1, n_harmonics)  # Shape: (n_samples, n_harmonics)
+    b_rain = trace.posterior.b_rain.values.reshape(-1, n_harmonics)
+    c_rain = trace.posterior.c_rain.values.reshape(-1, 1)
+    a_amount = trace.posterior.a_amount.values.reshape(-1, n_harmonics)
+    b_amount = trace.posterior.b_amount.values.reshape(-1, n_harmonics)
+    c_amount = trace.posterior.c_amount.values.reshape(-1, 1)
+    
+    # Get year effects
+    year_rain_effects = trace.posterior.year_rain_effects.values.reshape(-1, n_years)  # Shape: (n_samples, n_years)
+    year_amount_effects = trace.posterior.year_amount_effects.values.reshape(-1, n_years)
+    
+    # Initialize arrays
+    all_year_rain_probs = np.zeros((n_samples, n_days, n_years))
+    all_year_expected_amounts = np.zeros((n_samples, n_days, n_years))
+    
+    # Vectorize harmonic calculations for ALL days at once
+    # Shape: (n_harmonics, n_days)
+    h_values = np.arange(1, n_harmonics + 1)[:, None]  # Shape: (n_harmonics, 1)
+    day_values = days_of_year[None, :]  # Shape: (1, n_days)
+    
+    # Vectorized harmonic calculations
+    day_sin_all = np.sin(2 * h_values * np.pi * day_values / 365.25)  # Shape: (n_harmonics, n_days)
+    day_cos_all = np.cos(2 * h_values * np.pi * day_values / 365.25)  # Shape: (n_harmonics, n_days)
+    
+    # Calculate for each year
+    for k, year in enumerate(unique_years):
+        # Get year effects for this year
+        year_rain_effect = year_rain_effects[:, k:k+1]  # Shape: (n_samples, 1)
+        year_amount_effect = year_amount_effects[:, k:k+1]  # Shape: (n_samples, 1)
+        
+        # Vectorize rain probability calculations for ALL days at once
+        # Shape: (n_samples, n_days)
+        harmonic_rain_contrib = np.sum(a_rain[:, :, None] * day_sin_all[None, :, :] + 
+                                      b_rain[:, :, None] * day_cos_all[None, :, :], axis=1)
+        logit_p = c_rain + harmonic_rain_contrib + year_rain_effect
+        rain_probs_year = 1 / (1 + np.exp(-logit_p))
+        
+        # Vectorize rainfall amount calculations for ALL days at once
+        # Shape: (n_samples, n_days)
+        harmonic_amount_contrib = np.sum(a_amount[:, :, None] * day_sin_all[None, :, :] + 
+                                       b_amount[:, :, None] * day_cos_all[None, :, :], axis=1)
+        log_mu_amount = c_amount + harmonic_amount_contrib + year_amount_effect
+        expected_amounts_year = np.exp(log_mu_amount)
+        
+        all_year_rain_probs[:, :, k] = rain_probs_year
+        all_year_expected_amounts[:, :, k] = expected_amounts_year
+    
+    return all_year_rain_probs, all_year_expected_amounts
+
+
+def _sample_posterior_predictive_hierarchical(trace, data, days_of_year, expected_amounts, alpha_amounts):
+    """
+    Sample posterior predictive for hierarchical model (efficient vectorized version).
+    
+    This function samples actual rainfall observations that might occur, incorporating:
+    1. Parameter uncertainty (from MCMC samples)
+    2. Year-to-year variation (by sampling one random year per posterior sample)
+    3. Natural stochastic variation (binary rain + gamma amounts)
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from hierarchical model
+    data : pandas.DataFrame  
+        Original data (used to get unique years)
+    days_of_year : array
+        Days of year (1-365)
+    expected_amounts : array
+        Pre-computed expected amounts (shape: n_days, n_samples)
+    alpha_amounts : array
+        Pre-computed alpha parameters (shape: n_days, n_samples)
+        
+    Returns:
+    --------
+    tuple : (rain_indicators, rainfall_amounts)
+        Arrays of shape (n_samples, n_days) representing possible observations
+    """
+    print(f"  Starting efficient hierarchical posterior predictive sampling...")
+    
+    unique_years = data['year'].unique()
+    n_years = len(unique_years)
+    n_samples = expected_amounts.shape[1]
+    n_days = len(days_of_year)
+    
+    print(f"  Setup: {n_samples} posterior samples, {n_years} unique years")
+    
+    # Get year effects from trace (flattened)
+    year_rain_effects = trace.posterior.year_rain_effects.values.reshape(-1, n_years)  # (n_samples, n_years)
+    year_amount_effects = trace.posterior.year_amount_effects.values.reshape(-1, n_years)
+    
+    print(f"  Sampling one random year per posterior sample...")
+    # Sample ONE random year for each posterior sample (not 100!)
+    # Shape: (n_samples,)
+    sampled_year_indices = np.random.choice(n_years, size=n_samples)
+    
+    print(f"  Extracting year effects for sampled years...")
+    # Get year effects for sampled years
+    # Shape: (n_samples,)
+    sample_indices = np.arange(n_samples)
+    sampled_year_rain_effects = year_rain_effects[sample_indices, sampled_year_indices]
+    sampled_year_amount_effects = year_amount_effects[sample_indices, sampled_year_indices]
+    
+    print(f"  Computing rain probabilities with year effects...")
+    # Apply year effects to get rain probabilities
+    # expected_amounts shape: (n_days, n_samples) -> need to transpose for broadcasting
+    base_logit_p = np.log(expected_amounts.T / (1 - expected_amounts.T + 1e-8))  # Avoid log(0)
+    # Actually, we need to recompute logit_p from the base parameters since expected_amounts is already exponentiated
+    
+    # Get base parameters (flattened)
+    n_harmonics = trace.posterior.a_rain.shape[-1]
+    a_rain = trace.posterior.a_rain.values.reshape(-1, n_harmonics)  # (n_samples, n_harmonics)
+    b_rain = trace.posterior.b_rain.values.reshape(-1, n_harmonics)
+    c_rain = trace.posterior.c_rain.values.flatten()  # (n_samples,)
+    a_amount = trace.posterior.a_amount.values.reshape(-1, n_harmonics)
+    b_amount = trace.posterior.b_amount.values.reshape(-1, n_harmonics)
+    c_amount = trace.posterior.c_amount.values.flatten()
+    
+    # Compute harmonic features for all days (vectorized)
+    h_values = np.arange(1, n_harmonics + 1)[:, None]  # (n_harmonics, 1)
+    day_values = days_of_year[None, :]  # (1, n_days)
+    day_sin_all = np.sin(2 * h_values * np.pi * day_values / 365.25)  # (n_harmonics, n_days)
+    day_cos_all = np.cos(2 * h_values * np.pi * day_values / 365.25)
+    
+    # Compute rain probabilities with sampled year effects
+    # Shape: (n_samples, n_days)
+    harmonic_rain_contrib = np.sum(a_rain[:, :, None] * day_sin_all[None, :, :] + 
+                                  b_rain[:, :, None] * day_cos_all[None, :, :], axis=1)
+    logit_p = c_rain[:, None] + harmonic_rain_contrib + sampled_year_rain_effects[:, None]
+    rain_probs = 1 / (1 + np.exp(-logit_p))
+    
+    # Compute expected amounts with sampled year effects  
+    # Shape: (n_samples, n_days)
+    harmonic_amount_contrib = np.sum(a_amount[:, :, None] * day_sin_all[None, :, :] + 
+                                   b_amount[:, :, None] * day_cos_all[None, :, :], axis=1)
+    log_mu_amount = c_amount[:, None] + harmonic_amount_contrib + sampled_year_amount_effects[:, None]
+    mu_amounts = np.exp(log_mu_amount)
+    
+    print(f"  Sampling binary rain outcomes...")
+    # Sample binary rain outcomes
+    # Shape: (n_samples, n_days)
+    rain_indicators = np.random.binomial(1, rain_probs)
+    
+    print(f"  Sampling rainfall amounts for rainy days...")
+    # Sample rainfall amounts for rainy days only
+    # Shape: (n_samples, n_days)
+    rainfall_amounts = np.zeros_like(rain_probs)
+    rainy_mask = rain_indicators == 1
+    
+    if np.any(rainy_mask):
+        # Get alpha values (same for all days in this model)
+        alpha_vals = trace.posterior.alpha_amount.values.flatten()[:n_samples]  # (n_samples,)
+        
+        # Expand alpha to match the shape of mu_amounts for vectorized sampling
+        alpha_expanded = np.broadcast_to(alpha_vals[:, None], (n_samples, n_days))  # (n_samples, n_days)
+        
+    # Vectorized gamma sampling for rainy days
+        rainfall_amounts[rainy_mask] = np.random.gamma(
+            alpha_expanded[rainy_mask],  # Shape parameter
+            mu_amounts[rainy_mask] / alpha_expanded[rainy_mask]  # Scale parameter
+        )
+    
+    print(f"  Final shapes: rain_indicators {rain_indicators.shape}, rainfall_amounts {rainfall_amounts.shape}")
+    print(f"  Efficient hierarchical posterior predictive sampling completed!")
+    
+    return rain_indicators, rainfall_amounts
+
+
+def _get_observed_data(data):
+    """Extract observed data for plotting."""
+    observed_rain_prob = data.groupby('day_of_year')['PRCP'].apply(lambda x: (x > 0).mean()).values
+    observed_days = data.groupby('day_of_year')['PRCP'].apply(lambda x: (x > 0).mean()).index.values
+    rainy_data = data[data['PRCP'] > 0]
+    observed_rainfall = rainy_data.groupby('day_of_year')['PRCP'].mean().values
+    observed_rainy_days = rainy_data.groupby('day_of_year')['PRCP'].mean().index.values
+    
+    return observed_rain_prob, observed_days, observed_rainfall, observed_rainy_days

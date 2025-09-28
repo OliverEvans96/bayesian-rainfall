@@ -9,7 +9,62 @@ import pandas as pd
 import arviz as az
 import seaborn as sns
 from scipy import stats
-from .analysis import _evaluate_model_for_day
+from .analysis import (
+    _evaluate_model_for_day,
+    _get_year_effects_from_trace,
+    _apply_year_effects_to_predictions,
+    _calculate_expected_values_with_year_effects,
+    _get_all_year_predictions,
+    _sample_posterior_predictive_hierarchical,
+    _get_observed_data
+)
+
+
+def _sample_observed_rain_frequencies(rain_probs, n_years=6):
+    """
+    Sample observed rain frequencies accounting for sampling uncertainty using Beta distribution.
+    
+    This function models the sampling uncertainty from observing only n_years of data per day,
+    using a Beta distribution to approximate the sampling distribution of the sample proportion.
+    
+    Parameters:
+    -----------
+    rain_probs : array (n_days, n_samples)
+        Posterior samples of true rain probabilities
+    n_years : int
+        Number of years of observations per day
+        
+    Returns:
+    --------
+    observed_frequencies : array (n_days, n_samples)
+        Sampled observed frequencies including sampling uncertainty
+    """
+    n_days, n_samples = rain_probs.shape
+    observed_frequencies = np.zeros_like(rain_probs)
+    
+    for d in range(n_days):
+        for i in range(n_samples):
+            p_i = rain_probs[d, i]
+            
+            # Calculate Beta parameters to match sampling distribution
+            # For observed frequency X/n where X ~ Binomial(n, p_i):
+            # Mean = p_i, Variance = p_i * (1 - p_i) / n
+            mu = p_i
+            sigma_sq = p_i * (1 - p_i) / n_years
+            
+            if 0 < p_i < 1 and sigma_sq > 0:
+                # Method of moments: match mean and variance
+                scale_factor = mu * (1 - mu) / sigma_sq - 1
+                if scale_factor > 0:  # Valid Beta parameters
+                    alpha = mu * scale_factor
+                    beta = (1 - mu) * scale_factor
+                    observed_frequencies[d, i] = np.random.beta(alpha, beta)
+                else:
+                    observed_frequencies[d, i] = p_i  # Fallback to mean
+            else:
+                observed_frequencies[d, i] = p_i  # Edge case fallback
+    
+    return observed_frequencies
 
 
 def plot_trace(trace, param_names=None, figsize=(15, 8)):
@@ -33,9 +88,62 @@ def plot_trace(trace, param_names=None, figsize=(15, 8)):
     plt.show()
 
 
+def _create_combined_plots(days_of_year, rain_prob_mean, rain_prob_lower, rain_prob_upper,
+                         pp_rain_mean, pp_rain_lower, pp_rain_upper,
+                         rainfall_mean, rainfall_lower, rainfall_upper,
+                         pp_amounts_mean, pp_amounts_lower, pp_amounts_upper,
+                         observed_rain_prob, observed_days, observed_rainfall, observed_rainy_days,
+                         ci_level, figsize, n_years):
+    """Create the combined plots."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize)
+    
+    # Rain probability plot
+    ax1.fill_between(days_of_year, rain_prob_lower, rain_prob_upper, alpha=0.2, color='blue', 
+                    label=f'{int(ci_level*100)}% CI (Parameter Uncertainty)')
+    ax1.plot(days_of_year, rain_prob_mean, 'b-', linewidth=2, label='Expected Probability')
+    ax1.fill_between(days_of_year, pp_rain_lower, pp_rain_upper, alpha=0.3, color='green', 
+                    label=f'{int(ci_level*100)}% CI (Observed Frequencies, n={n_years})')
+    ax1.plot(days_of_year, pp_rain_mean, 'g--', linewidth=2, label='Mean Observed Frequency')
+    ax1.scatter(observed_days, observed_rain_prob, alpha=0.6, color='red', s=20, label='Observed')
+    ax1.set_xlabel('Day of Year')
+    ax1.set_ylabel('Rain Probability')
+    ax1.set_title('Rain Probability Predictions Across the Year')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Rainfall amount plot
+    ax2.fill_between(days_of_year, rainfall_lower, rainfall_upper, alpha=0.2, color='blue', 
+                    label=f'{int(ci_level*100)}% CI (Expected Amount)')
+    ax2.plot(days_of_year, rainfall_mean, 'b-', linewidth=2, label='Expected Amount')
+    ax2.fill_between(days_of_year, pp_amounts_lower, pp_amounts_upper, alpha=0.3, color='orange',
+                    label='95% CI (Posterior Predictive)')
+    ax2.plot(days_of_year, pp_amounts_mean, 'orange', linestyle='--', linewidth=2, label='Posterior Predictive Mean')
+    ax2.scatter(observed_rainy_days, observed_rainfall, alpha=0.6, color='red', s=20, label='Observed')
+    ax2.set_xlabel('Day of Year')
+    ax2.set_ylabel('Expected Rainfall (mm)')
+    ax2.set_title('Rainfall Amount Predictions Across the Year')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_combined_predictions(trace, data, ci_level=0.95, figsize=(14, 10)):
     """
     Plot combined rain probability and amount predictions across the year.
+    
+    Shows two types of confidence intervals:
+    - Blue CI: Parameter uncertainty only (expected values)
+    - Green CI: Observed frequencies accounting for sampling uncertainty (based on actual data years)
+    
+    For rain probability:
+    - Blue: Range of expected rain probabilities given parameter uncertainty
+    - Green: Range of observed rain frequencies we might see with the actual number of years of data
+    
+    For rainfall amounts:
+    - Blue: Range of expected amounts given parameter uncertainty  
+    - Green: Range of possible rainfall observations (including stochastic variation)
     
     Parameters:
     -----------
@@ -48,105 +156,72 @@ def plot_combined_predictions(trace, data, ci_level=0.95, figsize=(14, 10)):
     figsize : tuple, optional
         Figure size (width, height)
     """
+    print("Starting plot_combined_predictions...")
+    
+    # Calculate number of years from data
+    n_years = data['year'].nunique()
+    print(f"Detected {n_years} years of data: {sorted(data['year'].unique())}")
+    
     # Calculate percentiles
     lower_percentile = 50 - (ci_level * 50)
     upper_percentile = 50 + (ci_level * 50)
     
     days_of_year = np.arange(1, 366)
     
-    # Calculate rain probabilities and amounts for each day using the helper function
-    all_rain_probs = []
-    all_expected_amounts = []
-    all_alpha_amounts = []
+    print("Calculating expected values with year effects...")
+    # Calculate expected values with year effects
+    rain_probs, expected_amounts, alpha_amounts = _calculate_expected_values_with_year_effects(trace, days_of_year)
     
-    for day in days_of_year:
-        rain_probs, expected_amounts, alpha_amounts = _evaluate_model_for_day(trace, day)
-        all_rain_probs.append(rain_probs)
-        all_expected_amounts.append(expected_amounts)
-        all_alpha_amounts.append(alpha_amounts)
-    
-    # Convert to arrays
-    rain_probs = np.array(all_rain_probs)  # Shape: (365, n_samples)
-    expected_amounts = np.array(all_expected_amounts)  # Shape: (365, n_samples)
-    alpha_amounts = np.array(all_alpha_amounts)  # Shape: (365, n_samples)
-    
-    # Calculate statistics for expected probability
+    print("Calculating statistics for expected values...")
+    # Calculate statistics for expected values
     rain_prob_mean = np.mean(rain_probs, axis=1)
     rain_prob_lower = np.percentile(rain_probs, lower_percentile, axis=1)
     rain_prob_upper = np.percentile(rain_probs, upper_percentile, axis=1)
     
-    # Generate posterior predictive samples using direct evaluation
-    n_samples = rain_probs.shape[1]
-    rain_indicators = np.zeros((n_samples, 365))
-    rainfall_amounts = np.zeros((n_samples, 365))
+    print("Sampling posterior predictive (efficient version)...")
+    # Sample posterior predictive
+    rain_indicators, rainfall_amounts = _sample_posterior_predictive_hierarchical(
+        trace, data, days_of_year, expected_amounts, alpha_amounts
+    )
     
-    for i in range(n_samples):
-        for j, day in enumerate(days_of_year):
-            # Sample rain indicator
-            rain_indicator = np.random.binomial(1, rain_probs[j, i])
-            rain_indicators[i, j] = rain_indicator
-            
-            # Sample rainfall amount if it rains
-            if rain_indicator == 1:
-                rainfall = np.random.gamma(alpha_amounts[j, i], expected_amounts[j, i] / alpha_amounts[j, i])
-            else:
-                rainfall = 0
-            rainfall_amounts[i, j] = rainfall
+    print(f"Posterior predictive samples: rain_indicators shape {rain_indicators.shape}, rainfall_amounts shape {rainfall_amounts.shape}")
     
+    print("Calculating posterior predictive statistics...")
     # Calculate posterior predictive statistics
-    pp_rain_mean = np.mean(rain_indicators, axis=0)  # Shape: (365,)
-    pp_rain_lower = np.percentile(rain_indicators, lower_percentile, axis=0)
-    pp_rain_upper = np.percentile(rain_indicators, upper_percentile, axis=0)
     
-    pp_amounts_mean = np.mean(rainfall_amounts, axis=0)  # Shape: (365,)
+    # For rain probability PP CI: sample observed frequencies with sampling uncertainty
+    # This shows what rain frequencies we might observe given the actual number of years of data
+    print(f"Sampling observed rain frequencies with sampling uncertainty (n={n_years} years)...")
+    observed_rain_frequencies = _sample_observed_rain_frequencies(rain_probs, n_years=n_years)
+    
+    pp_rain_mean = np.mean(observed_rain_frequencies, axis=1)  # Average across samples for each day
+    pp_rain_lower = np.percentile(observed_rain_frequencies, lower_percentile, axis=1)
+    pp_rain_upper = np.percentile(observed_rain_frequencies, upper_percentile, axis=1)
+    
+    pp_amounts_mean = np.mean(rainfall_amounts, axis=0)  # Average across samples for each day
     pp_amounts_lower = np.percentile(rainfall_amounts, lower_percentile, axis=0)
     pp_amounts_upper = np.percentile(rainfall_amounts, upper_percentile, axis=0)
     
+    print("Calculating parameter uncertainty statistics...")
     # Calculate expected values (parameter uncertainty)
     rainfall_mean = np.mean(expected_amounts, axis=1)
     rainfall_lower = np.percentile(expected_amounts, lower_percentile, axis=1)
     rainfall_upper = np.percentile(expected_amounts, upper_percentile, axis=1)
     
+    print("Getting observed data...")
     # Get observed data
-    observed_rain_prob = data.groupby('day_of_year')['PRCP'].apply(lambda x: (x > 0).mean()).values
-    observed_days = data.groupby('day_of_year')['PRCP'].apply(lambda x: (x > 0).mean()).index.values
-    rainy_data = data[data['PRCP'] > 0]
-    observed_rainfall = rainy_data.groupby('day_of_year')['PRCP'].mean().values
-    observed_rainy_days = rainy_data.groupby('day_of_year')['PRCP'].mean().index.values
+    observed_rain_prob, observed_days, observed_rainfall, observed_rainy_days = _get_observed_data(data)
     
+    print("Creating plots...")
     # Create plots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize)
+    _create_combined_plots(days_of_year, rain_prob_mean, rain_prob_lower, rain_prob_upper,
+                         pp_rain_mean, pp_rain_lower, pp_rain_upper,
+                         rainfall_mean, rainfall_lower, rainfall_upper,
+                         pp_amounts_mean, pp_amounts_lower, pp_amounts_upper,
+                         observed_rain_prob, observed_days, observed_rainfall, observed_rainy_days,
+                         ci_level, figsize, n_years)
     
-    # Rain probability plot
-    ax1.fill_between(days_of_year, rain_prob_lower, rain_prob_upper, alpha=0.2, color='blue', 
-                    label=f'{int(ci_level*100)}% CI (Expected Probability)')
-    ax1.plot(days_of_year, rain_prob_mean, 'b-', linewidth=2, label='Expected Probability')
-    ax1.fill_between(days_of_year, pp_rain_lower, pp_rain_upper, alpha=0.3, color='green', 
-                    label=f'{int(ci_level*100)}% CI (Posterior Predictive)')
-    ax1.plot(days_of_year, pp_rain_mean, 'g--', linewidth=2, label='Posterior Predictive Mean')
-    ax1.scatter(observed_days, observed_rain_prob, alpha=0.6, color='red', s=20, label='Observed')
-    ax1.set_xlabel('Day of Year')
-    ax1.set_ylabel('Rain Probability')
-    ax1.set_title('Rain Probability Predictions Across the Year')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Rainfall amount plot
-    ax2.fill_between(days_of_year, rainfall_lower, rainfall_upper, alpha=0.2, color='green', 
-                    label='95% CI (Expected Amount)')
-    ax2.plot(days_of_year, rainfall_mean, 'g-', linewidth=2, label='Expected Amount')
-    ax2.fill_between(days_of_year, pp_amounts_lower, pp_amounts_upper, alpha=0.3, color='orange', 
-                    label='95% CI (Posterior Predictive)')
-    ax2.plot(days_of_year, pp_amounts_mean, 'orange', linestyle='--', linewidth=2, label='Posterior Predictive Mean')
-    ax2.scatter(observed_rainy_days, observed_rainfall, alpha=0.6, color='red', s=20, label='Observed (Rainy Days)')
-    ax2.set_xlabel('Day of Year')
-    ax2.set_ylabel('Expected Rainfall Amount (mm)')
-    ax2.set_title('Rainfall Amount Predictions for Rainy Days Across the Year')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.show()
+    print("Plot completed!")
 
 
 def plot_posterior_predictive_checks(trace, data, n_samples=100, figsize=(15, 10)):
@@ -178,39 +253,41 @@ def plot_posterior_predictive_checks(trace, data, n_samples=100, figsize=(15, 10
     
     n_samples = min(n_samples, len(a_rain_samples))
     
-    for i in range(n_samples):
-        # Get parameters for this sample
-        a_rain = a_rain_samples[i]
-        b_rain = b_rain_samples[i]
-        c_rain = c_rain_samples[i]
-        a_amount = a_amount_samples[i]
-        b_amount = b_amount_samples[i]
-        c_amount = c_amount_samples[i]
-        alpha_amount = alpha_amount_samples[i]
-        
-        # Calculate rain probabilities
-        day_of_year = data['day_of_year'].values
-        day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
-        day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
-        
-        logit_p = c_rain + a_rain * day_sin + b_rain * day_cos
-        p_rain = 1 / (1 + np.exp(-logit_p))
-        
-        # Sample rain indicators
-        rain_indicator = np.random.binomial(1, p_rain)
-        
-        # Calculate expected rainfall amounts
-        mu_amount = np.exp(c_amount + a_amount * day_sin + b_amount * day_cos)
-        
-        # Sample rainfall amounts for rainy days
-        rainfall = np.zeros(len(day_of_year))
-        rainy_mask = rain_indicator == 1
-        if np.sum(rainy_mask) > 0:
-            rainfall[rainy_mask] = np.random.gamma(alpha_amount, mu_amount[rainy_mask] / alpha_amount)
-        
-        full_rainfall_predictions.append(rainfall)
+    # Vectorize all calculations across samples
+    day_of_year = data['day_of_year'].values
+    day_sin = np.sin(2 * np.pi * day_of_year / 365.25)
+    day_cos = np.cos(2 * np.pi * day_of_year / 365.25)
     
-    full_rainfall_predictions = np.array(full_rainfall_predictions)
+    # Vectorize rain probability calculations for all samples
+    # Shape: (n_samples, n_days)
+    logit_p = (c_rain_samples[:, None] + 
+               a_rain_samples[:, None] * day_sin[None, :] + 
+               b_rain_samples[:, None] * day_cos[None, :])
+    p_rain = 1 / (1 + np.exp(-logit_p))
+    
+    # Vectorize rain indicator sampling for all samples
+    # Shape: (n_samples, n_days)
+    rain_indicators = np.random.binomial(1, p_rain)
+    
+    # Vectorize expected rainfall amount calculations for all samples
+    # Shape: (n_samples, n_days)
+    mu_amount = np.exp(c_amount_samples[:, None] + 
+                      a_amount_samples[:, None] * day_sin[None, :] + 
+                      b_amount_samples[:, None] * day_cos[None, :])
+    
+    # Vectorize rainfall amount sampling for all samples
+    # Shape: (n_samples, n_days)
+    rainfall = np.zeros((n_samples, len(day_of_year)))
+    rainy_mask = rain_indicators == 1
+    
+    # Only sample rainfall for rainy days (vectorized)
+    if np.any(rainy_mask):
+        rainfall[rainy_mask] = np.random.gamma(
+            alpha_amount_samples[:, None][rainy_mask],
+            mu_amount[rainy_mask] / alpha_amount_samples[:, None][rainy_mask]
+        )
+    
+    full_rainfall_predictions = rainfall
     
     # Create plots
     fig, axes = plt.subplots(2, 2, figsize=figsize)
@@ -305,30 +382,39 @@ def plot_specific_days_comparison(trace, data, selected_days=None, day_names=Non
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     axes = axes.flatten()
     
+    # Pre-compute all day predictions vectorized
+    all_day_predictions = []
+    all_day_data = []
+    
     for i, (day, day_name) in enumerate(zip(selected_days, day_names)):
         # Get observed data for this day of year across all years
         day_data = data[data['day_of_year'] == day]['PRCP'].values
+        all_day_data.append(day_data)
         
         # Get predicted data for this day of year using the helper function
         rain_probs, expected_amounts, alpha_amounts = _evaluate_model_for_day(trace, day)
         
-        # Sample predictions for this specific day
+        # Vectorize sampling for this specific day
         n_samples = min(100, len(rain_probs))
-        day_predictions = []
         
-        for j in range(n_samples):
-            # Sample rain indicator
-            rain_indicator = np.random.binomial(1, rain_probs[j])
-            
-            # Sample rainfall amount if it rains
-            if rain_indicator == 1:
-                rainfall = np.random.gamma(alpha_amounts[j], expected_amounts[j] / alpha_amounts[j])
-            else:
-                rainfall = 0
-            
-            day_predictions.append(rainfall)
+        # Sample rain indicators for all samples at once
+        rain_indicators = np.random.binomial(1, rain_probs[:n_samples])
         
-        day_predictions = np.array(day_predictions)
+        # Sample rainfall amounts for all samples at once
+        rainfall = np.zeros(n_samples)
+        rainy_mask = rain_indicators == 1
+        if np.any(rainy_mask):
+            rainfall[rainy_mask] = np.random.gamma(
+                alpha_amounts[:n_samples][rainy_mask],
+                expected_amounts[:n_samples][rainy_mask] / alpha_amounts[:n_samples][rainy_mask]
+            )
+        
+        all_day_predictions.append(rainfall)
+    
+    # Process each day for plotting
+    for i, (day, day_name) in enumerate(zip(selected_days, day_names)):
+        day_data = all_day_data[i]
+        day_predictions = all_day_predictions[i]
         
         # Create data for seaborn
         obs_df = pd.DataFrame({'Rainfall': day_data, 'Type': 'Observed'})
@@ -553,13 +639,12 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     data['week'] = ((data['day_of_year'] - 1) // 7) + 1
     observed_weekly_probs = data.groupby('week')['PRCP'].apply(lambda x: (x > 0).mean())
     
-    # Ensure we have probabilities for all 52 weeks
+    # Ensure we have probabilities for all 52 weeks (vectorized)
     observed_weekly_probs_full = np.zeros(52)
-    for week in range(1, 53):
-        if week in observed_weekly_probs.index:
-            observed_weekly_probs_full[week-1] = observed_weekly_probs[week]
-        else:
-            observed_weekly_probs_full[week-1] = 0  # No data for this week
+    week_indices = np.arange(1, 53)
+    valid_weeks = observed_weekly_probs.index.values
+    mask = np.isin(week_indices, valid_weeks)
+    observed_weekly_probs_full[mask] = observed_weekly_probs[week_indices[mask]].values
     
     # Create the plot
     fig, ax = plt.subplots(1, 1, figsize=(figsize[0], figsize[1]//2))
@@ -605,4 +690,178 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
         'pp_lower_ci': pp_lower_ci,
         'pp_upper_ci': pp_upper_ci,
         'observed_probs': observed_weekly_probs_full
+    }
+
+
+def plot_hierarchical_posterior_predictive_checks(trace, data, n_samples=100, figsize=(15, 10)):
+    """
+    Plot posterior predictive checks for hierarchical model comparing observed vs predicted data.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from hierarchical model sampling
+    data : pandas.DataFrame
+        Weather data with columns 'PRCP', 'day_of_year', and 'year'
+    n_samples : int, optional
+        Number of posterior samples to use for predictions
+    figsize : tuple, optional
+        Figure size (width, height)
+    """
+    from .analysis import _evaluate_model_for_day
+    
+    # Generate posterior predictive samples for each day
+    days_of_year = data['day_of_year'].values
+    years = data['year'].values
+    unique_days = np.unique(days_of_year)
+    
+    # Store predictions for each day
+    pp_rain_probs = []
+    pp_rainfall_amounts = []
+    
+    for day in unique_days:
+        # Get all years for this day
+        day_mask = days_of_year == day
+        day_years = years[day_mask]
+        
+        # Sample from posterior for each year
+        day_rain_probs = []
+        day_rainfall_amounts = []
+        
+        for year in day_years:
+            # Get posterior samples for this day and year
+            rain_probs, expected_amounts, alpha_amounts = _evaluate_model_for_day(trace, day, year)
+            
+            # Sample n_samples from the posterior
+            n_available = len(rain_probs)
+            if n_available >= n_samples:
+                sample_indices = np.random.choice(n_available, n_samples, replace=False)
+            else:
+                sample_indices = np.random.choice(n_available, n_samples, replace=True)
+            
+            day_rain_probs.extend(rain_probs[sample_indices])
+            day_rainfall_amounts.extend(expected_amounts[sample_indices])
+        
+        # Convert to numpy arrays and store
+        pp_rain_probs.append(np.array(day_rain_probs))
+        pp_rainfall_amounts.append(np.array(day_rainfall_amounts))
+    
+    # Calculate statistics for each day
+    pp_rain_mean = []
+    pp_rain_lower = []
+    pp_rain_upper = []
+    pp_amount_mean = []
+    pp_amount_lower = []
+    pp_amount_upper = []
+    
+    for i, day in enumerate(unique_days):
+        # Rain probability statistics
+        pp_rain_mean.append(np.mean(pp_rain_probs[i]))
+        pp_rain_lower.append(np.percentile(pp_rain_probs[i], 2.5))
+        pp_rain_upper.append(np.percentile(pp_rain_probs[i], 97.5))
+        
+        # Rainfall amount statistics
+        pp_amount_mean.append(np.mean(pp_rainfall_amounts[i]))
+        pp_amount_lower.append(np.percentile(pp_rainfall_amounts[i], 2.5))
+        pp_amount_upper.append(np.percentile(pp_rainfall_amounts[i], 97.5))
+    
+    # Convert to numpy arrays
+    pp_rain_mean = np.array(pp_rain_mean)
+    pp_rain_lower = np.array(pp_rain_lower)
+    pp_rain_upper = np.array(pp_rain_upper)
+    pp_amount_mean = np.array(pp_amount_mean)
+    pp_amount_lower = np.array(pp_amount_lower)
+    pp_amount_upper = np.array(pp_amount_upper)
+    
+    # Calculate observed statistics
+    observed_rain_probs = []
+    observed_rainfall_amounts = []
+    
+    for day in unique_days:
+        day_mask = days_of_year == day
+        day_data = data[day_mask]
+        
+        # Observed rain probability
+        rain_days = (day_data['PRCP'] > 0).sum()
+        total_days = len(day_data)
+        observed_rain_probs.append(rain_days / total_days)
+        
+        # Observed rainfall amount (only rainy days)
+        rainy_data = day_data[day_data['PRCP'] > 0]
+        if len(rainy_data) > 0:
+            observed_rainfall_amounts.append(rainy_data['PRCP'].mean())
+        else:
+            observed_rainfall_amounts.append(0)
+    
+    observed_rain_probs = np.array(observed_rain_probs)
+    observed_rainfall_amounts = np.array(observed_rainfall_amounts)
+    
+    # Create plots
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # 1. Rain probability comparison
+    ax1 = axes[0, 0]
+    ax1.plot(unique_days, pp_rain_mean, 'b-', linewidth=2, label='Posterior Predictive Mean')
+    ax1.fill_between(unique_days, pp_rain_lower, pp_rain_upper, alpha=0.3, color='blue', label='95% CI')
+    ax1.scatter(unique_days, observed_rain_probs, color='red', alpha=0.6, s=20, label='Observed')
+    ax1.set_xlabel('Day of Year')
+    ax1.set_ylabel('Rain Probability')
+    ax1.set_title('Rain Probability: Observed vs Posterior Predictive')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. Rainfall amount comparison
+    ax2 = axes[0, 1]
+    ax2.plot(unique_days, pp_amount_mean, 'g-', linewidth=2, label='Posterior Predictive Mean')
+    ax2.fill_between(unique_days, pp_amount_lower, pp_amount_upper, alpha=0.3, color='green', label='95% CI')
+    ax2.scatter(unique_days, observed_rainfall_amounts, color='red', alpha=0.6, s=20, label='Observed')
+    ax2.set_xlabel('Day of Year')
+    ax2.set_ylabel('Expected Rainfall (mm)')
+    ax2.set_title('Rainfall Amount: Observed vs Posterior Predictive')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # 3. Residuals for rain probability
+    ax3 = axes[1, 0]
+    rain_residuals = observed_rain_probs - pp_rain_mean
+    ax3.scatter(unique_days, rain_residuals, alpha=0.6, s=20)
+    ax3.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+    ax3.set_xlabel('Day of Year')
+    ax3.set_ylabel('Residuals (Observed - Predicted)')
+    ax3.set_title('Rain Probability Residuals')
+    ax3.grid(True, alpha=0.3)
+    
+    # 4. Residuals for rainfall amount
+    ax4 = axes[1, 1]
+    amount_residuals = observed_rainfall_amounts - pp_amount_mean
+    ax4.scatter(unique_days, amount_residuals, alpha=0.6, s=20)
+    ax4.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+    ax4.set_xlabel('Day of Year')
+    ax4.set_ylabel('Residuals (Observed - Predicted)')
+    ax4.set_title('Rainfall Amount Residuals')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print summary statistics
+    print("POSTERIOR PREDICTIVE CHECK SUMMARY")
+    print("=" * 50)
+    print(f"Rain Probability RMSE: {np.sqrt(np.mean(rain_residuals**2)):.4f}")
+    print(f"Rainfall Amount RMSE: {np.sqrt(np.mean(amount_residuals**2)):.4f}")
+    print(f"Rain Probability MAE: {np.mean(np.abs(rain_residuals)):.4f}")
+    print(f"Rainfall Amount MAE: {np.mean(np.abs(amount_residuals)):.4f}")
+    
+    return {
+        'unique_days': unique_days,
+        'pp_rain_mean': pp_rain_mean,
+        'pp_rain_lower': pp_rain_lower,
+        'pp_rain_upper': pp_rain_upper,
+        'pp_amount_mean': pp_amount_mean,
+        'pp_amount_lower': pp_amount_lower,
+        'pp_amount_upper': pp_amount_upper,
+        'observed_rain_probs': observed_rain_probs,
+        'observed_rainfall_amounts': observed_rainfall_amounts,
+        'rain_residuals': rain_residuals,
+        'amount_residuals': amount_residuals
     }
