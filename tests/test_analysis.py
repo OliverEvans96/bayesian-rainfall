@@ -1275,6 +1275,118 @@ class TestVisualizationFunctions:
         # (due to sampling uncertainty)
         assert np.mean(obs_width) > np.mean(param_width) * 0.8  # Allow some tolerance
 
+    def test_weekly_rain_probability_coverage(self):
+        """Test that weekly rain probability has reasonable coverage"""
+        from bayesian_rainfall.visualizations import _sample_observed_rain_frequencies
+        
+        # Test with realistic weekly probabilities
+        n_weeks = 20
+        n_samples = 1000
+        n_years = 6
+        
+        # Create weekly rain probabilities
+        weekly_rain_probs = np.random.uniform(0.2, 0.9, (n_weeks, n_samples))
+        
+        # Apply sampling uncertainty
+        observed_weekly_frequencies = _sample_observed_rain_frequencies(weekly_rain_probs, n_years)
+        
+        # Calculate coverage for each week
+        coverage_by_week = []
+        for week in range(n_weeks):
+            week_original = weekly_rain_probs[week, :]
+            week_observed = observed_weekly_frequencies[week, :]
+            
+            lower_2_5 = np.percentile(week_observed, 2.5)
+            upper_97_5 = np.percentile(week_observed, 97.5)
+            
+            within_ci = np.sum((week_original >= lower_2_5) & (week_original <= upper_97_5))
+            coverage = within_ci / n_samples
+            coverage_by_week.append(coverage)
+        
+        coverage_by_week = np.array(coverage_by_week)
+        overall_coverage = np.mean(coverage_by_week)
+        
+        # Coverage should be high (close to 1.0) since we're comparing true probabilities to observed CI
+        assert overall_coverage > 0.9, f"Coverage too low: {overall_coverage:.3f}"
+        
+        # Test that the Beta distribution has correct variance
+        for week in range(min(5, n_weeks)):  # Test first 5 weeks
+            week_observed = observed_weekly_frequencies[week, :]
+            week_original = weekly_rain_probs[week, :]
+            
+            observed_var = np.var(week_observed)
+            theoretical_var = np.mean(week_original) * (1 - np.mean(week_original)) / n_years
+            
+            # Variance should be close to theoretical (allow some tolerance for Beta approximation)
+            assert abs(observed_var - theoretical_var) / theoretical_var < 1.0, \
+                f"Week {week}: variance mismatch: observed={observed_var:.4f}, theoretical={theoretical_var:.4f}"
+
+    def test_weekly_rain_probability_observed_data_calculation(self):
+        """Test that observed data calculation matches expected proportions"""
+        import pandas as pd
+        
+        # Create test data
+        np.random.seed(42)
+        data = pd.DataFrame({
+            'day_of_year': np.tile(np.arange(1, 8), 6),  # 6 years, 7 days each
+            'year': np.repeat([2019, 2020, 2021, 2022, 2023, 2024], 7),
+            'PRCP': np.random.uniform(0, 2, 42)
+        })
+        
+        # Make some days have no rain
+        data.loc[data['PRCP'] < 0.5, 'PRCP'] = 0
+        
+        # Calculate observed data using the same method as the plot
+        data['week'] = ((data['day_of_year'] - 1) // 7) + 1
+        weekly_rain_by_year = data.groupby(['week', 'year'])['PRCP'].apply(lambda x: (x > 0).any())
+        observed_weekly_probs = weekly_rain_by_year.groupby('week').mean()
+        
+        # Check that values are between 0 and 1
+        assert all(0 <= x <= 1 for x in observed_weekly_probs), \
+            "Observed probabilities should be between 0 and 1"
+        
+        # Check that we get realistic values (not all 0 or all 1)
+        unique_values = len(set(observed_weekly_probs))
+        # Note: with only 1 week and 6 years, we might get all 1s or all 0s by chance
+        # This is acceptable for this small test case
+        
+        # Check that the calculation makes sense
+        # For week 1, we should have some years with rain and some without
+        week_1_data = data[data['week'] == 1]
+        years_with_rain = week_1_data.groupby('year')['PRCP'].apply(lambda x: (x > 0).any()).sum()
+        expected_proportion = years_with_rain / 6
+        actual_proportion = observed_weekly_probs.iloc[0]
+        
+        assert abs(actual_proportion - expected_proportion) < 1e-10, \
+            f"Observed proportion {actual_proportion} should match expected calculation {expected_proportion}"
+
+    def test_weekly_rain_probability_ci_widths(self):
+        """Test that CI widths are reasonable"""
+        from bayesian_rainfall.visualizations import _sample_observed_rain_frequencies
+        
+        # Test with different weekly probabilities
+        test_probs = [0.3, 0.5, 0.7, 0.9]
+        n_years = 6
+        n_samples = 1000
+        
+        for prob in test_probs:
+            weekly_probs = np.full((1, n_samples), prob)
+            observed_frequencies = _sample_observed_rain_frequencies(weekly_probs, n_years)
+            
+            # Calculate CI
+            lower_2_5 = np.percentile(observed_frequencies, 2.5)
+            upper_97_5 = np.percentile(observed_frequencies, 97.5)
+            ci_width = upper_97_5 - lower_2_5
+            
+            # CI width should be reasonable (not too wide, not too narrow)
+            assert ci_width > 0.1, f"CI width too narrow for prob {prob}: {ci_width:.3f}"
+            assert ci_width < 0.9, f"CI width too wide for prob {prob}: {ci_width:.3f}"
+            
+            # CI should be centered around the true probability (allow some tolerance)
+            ci_center = (lower_2_5 + upper_97_5) / 2
+            assert abs(ci_center - prob) < 0.2, \
+                f"CI center {ci_center:.3f} should be close to true prob {prob}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -70,19 +70,20 @@ def _sample_observed_rain_frequencies(rain_probs, n_years=6):
     observed_frequencies : array (n_days, n_samples)
         Sampled observed frequencies including sampling uncertainty
     """
-    # Vectorized calculation of Beta parameters
+    # Vectorized calculation of Beta parameters using method of moments
     # For observed frequency X/n where X ~ Binomial(n, p_i):
     # Mean = p_i, Variance = p_i * (1 - p_i) / n
     mu = rain_probs  # Mean is the true probability
     sigma_sq = rain_probs * (1 - rain_probs) / n_years  # Variance
     
-    # Calculate scale factor for Beta distribution
-    # scale_factor = n_years - 1 (simplified from the method of moments)
-    scale_factor = n_years - 1
+    # Method of moments: solve for α and β such that
+    # α/(α+β) = p and αβ/((α+β)²(α+β+1)) = p(1-p)/n
+    # This gives: α = p * (p(1-p)/σ² - 1), β = (1-p) * (p(1-p)/σ² - 1)
+    scale_factor = mu * (1 - mu) / sigma_sq - 1
     
     # Calculate Beta parameters
-    alpha = rain_probs * scale_factor
-    beta = (1 - rain_probs) * scale_factor
+    alpha = mu * scale_factor
+    beta = (1 - mu) * scale_factor
     
     # Create masks for valid Beta parameters
     valid_mask = (rain_probs > 0) & (rain_probs < 1) & (sigma_sq > 0) & (scale_factor > 0)
@@ -642,6 +643,14 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     """
     Plot the chance of any rain each week throughout the year.
     
+    Shows two types of confidence intervals:
+    - Blue CI: Parameter uncertainty only (expected values)
+    - Green CI: Observed frequencies accounting for sampling uncertainty (based on actual data years)
+    
+    For weekly rain probability:
+    - Blue: Range of expected rain probabilities given parameter uncertainty
+    - Green: Range of observed rain frequencies we might see with the actual number of years of data
+    
     Parameters:
     -----------
     trace : arviz.InferenceData
@@ -655,16 +664,21 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     weeks = np.arange(1, 53)
     week_centers = np.arange(1, 366, 7)  # Center of each week
     
-    # Calculate rain probabilities for each week using the existing helper function
-    weekly_rain_probs = []
+    # Calculate rain probabilities for each week using vectorized approach
+    # Use the center day of each week for calculation
+    week_centers = weeks * 7 - 3  # Center of each week
     
-    for week in weeks:
-        # Use the center day of the week for calculation
-        day_of_year = week * 7 - 3  # Center of the week
+    # Vectorized evaluation for all weeks at once
+    # First get daily rain probabilities for each week center
+    daily_rain_probs = []
+    for day_of_year in week_centers:
         rain_probs, _, _ = _evaluate_model_for_day(trace, day_of_year)
-        weekly_rain_probs.append(rain_probs)
+        daily_rain_probs.append(rain_probs)
     
-    weekly_rain_probs = np.array(weekly_rain_probs)
+    daily_rain_probs = np.array(daily_rain_probs)
+    
+    # Convert daily probabilities to weekly probabilities: P(weekly) = 1 - (1 - P(daily))^7
+    weekly_rain_probs = 1 - (1 - daily_rain_probs)**7
     
     # Calculate statistics for expected probability
     mean_probs = np.mean(weekly_rain_probs, axis=1)
@@ -672,28 +686,28 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     lower_ci = np.percentile(weekly_rain_probs, 2.5, axis=1)
     upper_ci = np.percentile(weekly_rain_probs, 97.5, axis=1)
     
-    # Generate posterior predictive samples for each week
-    n_samples = 1000
-    posterior_predictive_weekly = []
+    # Generate observed frequencies using Beta distribution approach
+    # We want to model what we might observe for the proportion of years with at least one rainy day
+    # This is a binomial proportion with n=n_years and p=weekly_rain_probability
+    n_years = data['year'].nunique()
+    print(f"Using Beta distribution approach with n={n_years} years for observed proportions")
     
-    for week in weeks:
-        day_of_year = week * 7 - 3  # Center of the week
-        rain_probs, _, _ = _evaluate_model_for_day(trace, day_of_year)
-        
-        # Sample binary rain indicators for this week
-        week_predictions = np.random.binomial(1, rain_probs[:n_samples])
-        posterior_predictive_weekly.append(week_predictions)
+    # Apply sampling uncertainty to model what we might observe for the proportion of years with rain
+    # The observed proportion follows a Beta distribution with mean p and variance p(1-p)/n_years
+    observed_weekly_frequencies = _sample_observed_rain_frequencies(weekly_rain_probs, n_years)
     
-    posterior_predictive_weekly = np.array(posterior_predictive_weekly)
-    
-    # Calculate posterior predictive statistics
-    pp_mean = np.mean(posterior_predictive_weekly, axis=1)
-    pp_lower_ci = np.percentile(posterior_predictive_weekly, 2.5, axis=1)
-    pp_upper_ci = np.percentile(posterior_predictive_weekly, 97.5, axis=1)
+    # Calculate posterior predictive statistics for observed frequencies
+    pp_mean = np.mean(observed_weekly_frequencies, axis=1)
+    pp_lower_ci = np.percentile(observed_weekly_frequencies, 2.5, axis=1)
+    pp_upper_ci = np.percentile(observed_weekly_frequencies, 97.5, axis=1)
     
     # Calculate observed rain probabilities by week
+    # We want the proportion of weeks (across years) that have at least one rainy day
     data['week'] = ((data['day_of_year'] - 1) // 7) + 1
-    observed_weekly_probs = data.groupby('week')['PRCP'].apply(lambda x: (x > 0).mean())
+    # Group by week and year, then check if any day in that week-year has rain
+    weekly_rain_by_year = data.groupby(['week', 'year'])['PRCP'].apply(lambda x: (x > 0).any())
+    # Then take the mean across years for each week
+    observed_weekly_probs = weekly_rain_by_year.groupby('week').mean()
     
     # Ensure we have probabilities for all 52 weeks (vectorized)
     observed_weekly_probs_full = np.zeros(52)
@@ -710,11 +724,11 @@ def plot_weekly_rain_probability(trace, data, figsize=(16, 8)):
     
     # Weekly rain probability with confidence intervals
     ax.fill_between(week_dates, lower_ci, upper_ci, alpha=0.2, color='blue', 
-                    label='95% CI (Expected Probability)')
+                    label='95% CI (Parameter Uncertainty)')
     ax.plot(week_dates, mean_probs, 'b-', linewidth=2, label='Expected Probability')
     ax.fill_between(week_dates, pp_lower_ci, pp_upper_ci, alpha=0.3, color='green', 
-                    label='95% CI (Posterior Predictive)')
-    ax.plot(week_dates, pp_mean, 'g--', linewidth=2, label='Posterior Predictive Mean')
+                    label=f'95% CI (Observed Frequencies, n={n_years})')
+    ax.plot(week_dates, pp_mean, 'g--', linewidth=2, label='Mean Observed Frequency')
     ax.scatter(week_dates, observed_weekly_probs_full, color='red', s=30, alpha=0.7, 
                label='Observed Probability', zorder=5)
     ax.set_ylabel('Probability of Any Rain')
