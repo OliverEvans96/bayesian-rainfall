@@ -22,7 +22,11 @@ from bayesian_rainfall.analysis import (
     _get_year_effects_from_trace,
     _apply_year_effects_to_predictions,
     _get_all_year_predictions,
-    _get_observed_data
+    _get_observed_data,
+    sample_cumulative_rainfall_probability,
+    sample_rainfall_reach_time,
+    analyze_cumulative_rainfall_probability,
+    analyze_rainfall_reach_time
 )
 
 
@@ -1386,6 +1390,352 @@ class TestVisualizationFunctions:
             ci_center = (lower_2_5 + upper_97_5) / 2
             assert abs(ci_center - prob) < 0.2, \
                 f"CI center {ci_center:.3f} should be close to true prob {prob}"
+
+
+class TestCumulativeRainfallProbability:
+    """Test the sample_cumulative_rainfall_probability function."""
+    
+    def test_sample_cumulative_rainfall_probability_basic(self):
+        """Test basic functionality of sample_cumulative_rainfall_probability."""
+        # Create mock trace and data
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test basic functionality
+        cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+            trace, data, start_day=335, end_day=348, target_mm=50, n_samples=100
+        )
+        
+        # Check output shapes
+        assert cumulative_rainfall.shape == (100, 14)  # n_samples, n_days
+        assert isinstance(results, dict)
+        
+        # Check required keys in results
+        required_keys = ['probability_reach_target', 'target_mm', 'start_day', 'end_day',
+                        'mean_cumulative', 'std_cumulative', 'ci_95', 'samples']
+        for key in required_keys:
+            assert key in results
+        
+        # Check probability is between 0 and 1
+        assert 0 <= results['probability_reach_target'] <= 1
+        
+        # Check target values are correct
+        assert results['target_mm'] == 50
+        assert results['start_day'] == 335
+        assert results['end_day'] == 348
+        
+        # Check cumulative rainfall increases (or stays same) over time
+        for i in range(cumulative_rainfall.shape[0]):
+            for j in range(1, cumulative_rainfall.shape[1]):
+                assert cumulative_rainfall[i, j] >= cumulative_rainfall[i, j-1]
+    
+    def test_sample_cumulative_rainfall_probability_edge_cases(self):
+        """Test edge cases for sample_cumulative_rainfall_probability."""
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test single day
+        cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+            trace, data, start_day=335, end_day=335, target_mm=10, n_samples=50
+        )
+        assert cumulative_rainfall.shape == (50, 1)
+        
+        # Test very high target (should have low probability)
+        cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+            trace, data, start_day=335, end_day=348, target_mm=1000, n_samples=50
+        )
+        assert results['probability_reach_target'] < 0.1
+        
+        # Test very low target (should have high probability)
+        cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+            trace, data, start_day=335, end_day=348, target_mm=1, n_samples=50
+        )
+        assert results['probability_reach_target'] > 0.5
+    
+    def test_sample_cumulative_rainfall_probability_different_periods(self):
+        """Test with different time periods."""
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test winter period
+        cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+            trace, data, start_day=1, end_day=31, target_mm=100, n_samples=50
+        )
+        assert cumulative_rainfall.shape == (50, 31)
+        
+        # Test summer period
+        cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+            trace, data, start_day=180, end_day=210, target_mm=50, n_samples=50
+        )
+        assert cumulative_rainfall.shape == (50, 31)
+    
+    def _create_mock_trace(self):
+        """Create a mock trace for testing."""
+        # Create mock trace with required posterior variables
+        mock_trace = Mock()
+        mock_trace.posterior = Mock()
+        
+        # Mock p_rain and mu_amount (shape: chains, draws, n_obs)
+        # Need to match the data size: 6 years × 366 days = 2196 observations
+        n_chains, n_draws, n_obs = 2, 50, 2196
+        mock_trace.posterior.p_rain = Mock()
+        mock_trace.posterior.p_rain.values = np.random.beta(2, 5, (n_chains, n_draws, n_obs))
+        
+        mock_trace.posterior.mu_amount = Mock()
+        mock_trace.posterior.mu_amount.values = np.random.gamma(2, 5, (n_chains, n_draws, n_obs))
+        
+        # Mock alpha_amount
+        mock_trace.posterior.alpha_amount = Mock()
+        mock_trace.posterior.alpha_amount.values = np.random.gamma(2, 1, (n_chains, n_draws))
+        
+        return mock_trace
+    
+    def _create_mock_data(self):
+        """Create mock data for testing."""
+        # Create data for 6 years with all days
+        years = [2019, 2020, 2021, 2022, 2023, 2024]
+        data_list = []
+        
+        for year in years:
+            for day in range(1, 367):  # Include leap year
+                data_list.append({
+                    'year': year,
+                    'day_of_year': day,
+                    'PRCP': np.random.exponential(5) if np.random.random() < 0.3 else 0
+                })
+        
+        return pd.DataFrame(data_list)
+
+
+class TestRainfallReachTime:
+    """Test the sample_rainfall_reach_time function."""
+    
+    def test_sample_rainfall_reach_time_basic(self):
+        """Test basic functionality of sample_rainfall_reach_time."""
+        # Create mock trace and data
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test basic functionality
+        reach_times, results = sample_rainfall_reach_time(
+            trace, data, start_day=335, target_mm=50, max_days=31, n_samples=100
+        )
+        
+        # Check output shapes
+        assert reach_times.shape == (100,)
+        assert isinstance(results, dict)
+        
+        # Check required keys in results
+        required_keys = ['probability_reach', 'target_mm', 'start_day',
+                        'mean_days', 'std_days', 'ci_95', 'samples']
+        for key in required_keys:
+            assert key in results
+        
+        # Check probability is between 0 and 1
+        assert 0 <= results['probability_reach'] <= 1
+        
+        # Check target values are correct
+        assert results['target_mm'] == 50
+        assert results['start_day'] == 335
+        
+        # Check reach times are within expected range
+        valid_times = reach_times[~np.isnan(reach_times)]
+        if len(valid_times) > 0:
+            # Times should be day-of-year values (1-365)
+            assert np.all(valid_times >= 1)
+            assert np.all(valid_times <= 365)
+    
+    def test_sample_rainfall_reach_time_edge_cases(self):
+        """Test edge cases for sample_rainfall_reach_time."""
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test very high target (should have low probability)
+        reach_times, results = sample_rainfall_reach_time(
+            trace, data, start_day=335, target_mm=1000, max_days=31, n_samples=50
+        )
+        assert results['probability_reach'] < 0.1
+        
+        # Test very low target (should have high probability)
+        reach_times, results = sample_rainfall_reach_time(
+            trace, data, start_day=335, target_mm=1, max_days=31, n_samples=50
+        )
+        assert results['probability_reach'] > 0.5
+        
+        # Test short time horizon
+        reach_times, results = sample_rainfall_reach_time(
+            trace, data, start_day=335, target_mm=50, max_days=1, n_samples=50
+        )
+        # Should have low probability of reaching target in just 1 day
+        assert results['probability_reach'] < 0.5
+    
+    def test_sample_rainfall_reach_time_periodicity(self):
+        """Test periodicity handling in sample_rainfall_reach_time."""
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test near year boundary
+        reach_times, results = sample_rainfall_reach_time(
+            trace, data, start_day=360, target_mm=50, max_days=20, n_samples=50
+        )
+        
+        # Should handle periodicity correctly
+        valid_times = reach_times[~np.isnan(reach_times)]
+        if len(valid_times) > 0:
+            # Times should be day-of-year values, which can be > 365 due to periodicity
+            # Check that they're reasonable day-of-year values
+            assert np.all((valid_times >= 1) & (valid_times <= 365))
+    
+    def _create_mock_trace(self):
+        """Create a mock trace for testing."""
+        # Create mock trace with required posterior variables
+        mock_trace = Mock()
+        mock_trace.posterior = Mock()
+        
+        # Mock p_rain and mu_amount (shape: chains, draws, n_obs)
+        # Need to match the data size: 6 years × 366 days = 2196 observations
+        n_chains, n_draws, n_obs = 2, 50, 2196
+        mock_trace.posterior.p_rain = Mock()
+        mock_trace.posterior.p_rain.values = np.random.beta(2, 5, (n_chains, n_draws, n_obs))
+        
+        mock_trace.posterior.mu_amount = Mock()
+        mock_trace.posterior.mu_amount.values = np.random.gamma(2, 5, (n_chains, n_draws, n_obs))
+        
+        # Mock alpha_amount
+        mock_trace.posterior.alpha_amount = Mock()
+        mock_trace.posterior.alpha_amount.values = np.random.gamma(2, 1, (n_chains, n_draws))
+        
+        return mock_trace
+    
+    def _create_mock_data(self):
+        """Create mock data for testing."""
+        # Create data for 6 years with all days
+        years = [2019, 2020, 2021, 2022, 2023, 2024]
+        data_list = []
+        
+        for year in years:
+            for day in range(1, 367):  # Include leap year
+                data_list.append({
+                    'year': year,
+                    'day_of_year': day,
+                    'PRCP': np.random.exponential(5) if np.random.random() < 0.3 else 0
+                })
+        
+        return pd.DataFrame(data_list)
+
+
+class TestAnalyzeCumulativeRainfallProbability:
+    """Test the analyze_cumulative_rainfall_probability function."""
+    
+    def test_analyze_cumulative_rainfall_probability_basic(self):
+        """Test basic functionality of analyze_cumulative_rainfall_probability."""
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test with plots disabled
+        results = analyze_cumulative_rainfall_probability(
+            trace, data, start_day=335, end_day=348, target_mm=50, 
+            n_samples=100, show_plots=False
+        )
+        
+        # Check that results are returned
+        assert results is not None
+        
+        # Test with plots enabled (should not raise error)
+        results = analyze_cumulative_rainfall_probability(
+            trace, data, start_day=335, end_day=348, target_mm=50, 
+            n_samples=100, show_plots=True
+        )
+        assert results is not None
+    
+    def _create_mock_trace(self):
+        """Create a mock trace for testing."""
+        mock_trace = Mock()
+        mock_trace.posterior = Mock()
+        
+        n_chains, n_draws, n_obs = 2, 50, 2196
+        mock_trace.posterior.p_rain = Mock()
+        mock_trace.posterior.p_rain.values = np.random.beta(2, 5, (n_chains, n_draws, n_obs))
+        
+        mock_trace.posterior.mu_amount = Mock()
+        mock_trace.posterior.mu_amount.values = np.random.gamma(2, 5, (n_chains, n_draws, n_obs))
+        
+        mock_trace.posterior.alpha_amount = Mock()
+        mock_trace.posterior.alpha_amount.values = np.random.gamma(2, 1, (n_chains, n_draws))
+        
+        return mock_trace
+    
+    def _create_mock_data(self):
+        """Create mock data for testing."""
+        years = [2019, 2020, 2021, 2022, 2023, 2024]
+        data_list = []
+        
+        for year in years:
+            for day in range(1, 367):
+                data_list.append({
+                    'year': year,
+                    'day_of_year': day,
+                    'PRCP': np.random.exponential(5) if np.random.random() < 0.3 else 0
+                })
+        
+        return pd.DataFrame(data_list)
+
+
+class TestAnalyzeRainfallReachTime:
+    """Test the analyze_rainfall_reach_time function."""
+    
+    def test_analyze_rainfall_reach_time_basic(self):
+        """Test basic functionality of analyze_rainfall_reach_time."""
+        trace = self._create_mock_trace()
+        data = self._create_mock_data()
+        
+        # Test with plots disabled
+        results = analyze_rainfall_reach_time(
+            trace, data, start_day=335, target_mm=50, max_days=31, 
+            n_samples=100, show_plots=False
+        )
+        
+        # Check that results are returned
+        assert results is not None
+        
+        # Test with plots enabled (should not raise error)
+        results = analyze_rainfall_reach_time(
+            trace, data, start_day=335, target_mm=50, max_days=31, 
+            n_samples=100, show_plots=True
+        )
+        assert results is not None
+    
+    def _create_mock_trace(self):
+        """Create a mock trace for testing."""
+        mock_trace = Mock()
+        mock_trace.posterior = Mock()
+        
+        n_chains, n_draws, n_obs = 2, 50, 2196
+        mock_trace.posterior.p_rain = Mock()
+        mock_trace.posterior.p_rain.values = np.random.beta(2, 5, (n_chains, n_draws, n_obs))
+        
+        mock_trace.posterior.mu_amount = Mock()
+        mock_trace.posterior.mu_amount.values = np.random.gamma(2, 5, (n_chains, n_draws, n_obs))
+        
+        mock_trace.posterior.alpha_amount = Mock()
+        mock_trace.posterior.alpha_amount.values = np.random.gamma(2, 1, (n_chains, n_draws))
+        
+        return mock_trace
+    
+    def _create_mock_data(self):
+        """Create mock data for testing."""
+        years = [2019, 2020, 2021, 2022, 2023, 2024]
+        data_list = []
+        
+        for year in years:
+            for day in range(1, 367):
+                data_list.append({
+                    'year': year,
+                    'day_of_year': day,
+                    'PRCP': np.random.exponential(5) if np.random.random() < 0.3 else 0
+                })
+        
+        return pd.DataFrame(data_list)
 
 
 if __name__ == "__main__":

@@ -1757,6 +1757,471 @@ def analyze_december_rainfall(trace, data, n_samples=1000, show_plots=True):
     }
 
 
+def sample_cumulative_rainfall_probability(trace, data, start_day, end_day, target_mm, n_samples=1000):
+    """
+    Sample the probability of reaching a target cumulative rainfall amount within a date range.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from the hierarchical model
+    data : pd.DataFrame
+        Original data with 'day_of_year' column
+    start_day : int
+        Starting day of year (inclusive)
+    end_day : int
+        Ending day of year (inclusive)
+    target_mm : float
+        Target cumulative rainfall amount in mm
+    n_samples : int
+        Number of samples to generate
+    
+    Returns:
+    --------
+    array : Samples of cumulative rainfall amounts
+    dict : Analysis results including probability of reaching target
+    """
+    # Get the date range
+    days = np.arange(start_day, end_day + 1)
+    
+    # Get all data for the date range (across all years)
+    range_data = data[data['day_of_year'].between(start_day, end_day)]
+    range_indices = range_data.index.values - data.index[0]
+    
+    # Get p_rain and mu_amount for all observations in the range from trace
+    range_p_rain = trace.posterior.p_rain.values[:, :, range_indices]  # Shape: (chains, draws, n_obs)
+    range_mu_amount = trace.posterior.mu_amount.values[:, :, range_indices]
+    
+    # Reshape to group by day of year: (chains, draws, n_years, n_days)
+    n_years = len(data['year'].unique())
+    n_days = len(days)
+    range_p_rain_by_day = range_p_rain.reshape(-1, n_years, n_days)  # Flatten chains and draws
+    range_mu_amount_by_day = range_mu_amount.reshape(-1, n_years, n_days)
+    
+    # Sample one random year for each posterior sample
+    n_samples = min(n_samples, range_p_rain_by_day.shape[0])
+    sampled_year_indices = np.random.choice(n_years, size=n_samples)
+    
+    # Extract the sampled year for each posterior sample
+    sample_indices = np.arange(n_samples)
+    range_p_rain_sampled = range_p_rain_by_day[sample_indices, sampled_year_indices, :]  # Shape: (n_samples, n_days)
+    range_mu_amount_sampled = range_mu_amount_by_day[sample_indices, sampled_year_indices, :]
+    
+    # Sample rain indicators
+    rain_indicators = np.random.binomial(1, range_p_rain_sampled)
+    
+    # Sample rainfall amounts for rainy days
+    alpha_amount = trace.posterior.alpha_amount.values.flatten()[:n_samples]
+    rainfall_amounts = np.zeros_like(range_p_rain_sampled)
+    rainy_mask = rain_indicators == 1
+    
+    if np.any(rainy_mask):
+        alpha_expanded = np.broadcast_to(alpha_amount[:, None], (n_samples, n_days))
+        rainfall_amounts[rainy_mask] = np.random.gamma(
+            alpha_expanded[rainy_mask],
+            range_mu_amount_sampled[rainy_mask] / alpha_expanded[rainy_mask]
+        )
+    
+    # Calculate cumulative rainfall for each sample
+    cumulative_rainfall = np.cumsum(rainfall_amounts, axis=1)  # Shape: (n_samples, n_days)
+    
+    # Calculate probability of reaching target
+    reached_target = np.any(cumulative_rainfall >= target_mm, axis=1)
+    probability = np.mean(reached_target)
+    
+    # Calculate statistics
+    final_cumulative = cumulative_rainfall[:, -1]  # Final cumulative amount for each sample
+    mean_cumulative = np.mean(final_cumulative)
+    std_cumulative = np.std(final_cumulative)
+    ci_95 = np.percentile(final_cumulative, [2.5, 97.5])
+    
+    return cumulative_rainfall, {
+        'probability_reach_target': probability,
+        'target_mm': target_mm,
+        'start_day': start_day,
+        'end_day': end_day,
+        'mean_cumulative': mean_cumulative,
+        'std_cumulative': std_cumulative,
+        'ci_95': ci_95,
+        'samples': final_cumulative
+    }
+
+
+def sample_rainfall_reach_time(trace, data, start_day, target_mm, max_days=31, n_samples=1000):
+    """
+    Sample when cumulative rainfall will reach a target amount, starting from a given day.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from the hierarchical model
+    data : pd.DataFrame
+        Original data with 'day_of_year' column
+    start_day : int
+        Starting day of year
+    target_mm : float
+        Target cumulative rainfall amount in mm
+    max_days : int
+        Maximum number of days to look ahead
+    n_samples : int
+        Number of samples to generate
+    
+    Returns:
+    --------
+    array : Samples of days to reach target (NaN if not reached within max_days)
+    dict : Analysis results
+    """
+    # Get the date range (handle year boundary)
+    days = []
+    current_day = start_day
+    for _ in range(max_days):
+        days.append(current_day)
+        current_day = current_day + 1
+        if current_day > 365:
+            current_day = 1  # Wrap to next year
+    
+    days = np.array(days)
+    
+    # Get all data for the date range (across all years)
+    range_data = data[data['day_of_year'].isin(days)]
+    range_indices = range_data.index.values - data.index[0]
+    
+    # Get p_rain and mu_amount for all observations in the range from trace
+    range_p_rain = trace.posterior.p_rain.values[:, :, range_indices]  # Shape: (chains, draws, n_obs)
+    range_mu_amount = trace.posterior.mu_amount.values[:, :, range_indices]
+    
+    # Reshape to group by day of year: (chains, draws, n_years, n_days)
+    n_years = len(data['year'].unique())
+    n_days = len(days)
+    range_p_rain_by_day = range_p_rain.reshape(-1, n_years, n_days)  # Flatten chains and draws
+    range_mu_amount_by_day = range_mu_amount.reshape(-1, n_years, n_days)
+    
+    # Sample one random year for each posterior sample
+    n_samples = min(n_samples, range_p_rain_by_day.shape[0])
+    sampled_year_indices = np.random.choice(n_years, size=n_samples)
+    
+    # Extract the sampled year for each posterior sample
+    sample_indices = np.arange(n_samples)
+    range_p_rain_sampled = range_p_rain_by_day[sample_indices, sampled_year_indices, :]  # Shape: (n_samples, n_days)
+    range_mu_amount_sampled = range_mu_amount_by_day[sample_indices, sampled_year_indices, :]
+    
+    # Sample rain indicators
+    rain_indicators = np.random.binomial(1, range_p_rain_sampled)
+    
+    # Sample rainfall amounts for rainy days
+    alpha_amount = trace.posterior.alpha_amount.values.flatten()[:n_samples]
+    rainfall_amounts = np.zeros_like(range_p_rain_sampled)
+    rainy_mask = rain_indicators == 1
+    
+    if np.any(rainy_mask):
+        alpha_expanded = np.broadcast_to(alpha_amount[:, None], (n_samples, n_days))
+        rainfall_amounts[rainy_mask] = np.random.gamma(
+            alpha_expanded[rainy_mask],
+            range_mu_amount_sampled[rainy_mask] / alpha_expanded[rainy_mask]
+        )
+    
+    # Calculate cumulative rainfall for each sample
+    cumulative_rainfall = np.cumsum(rainfall_amounts, axis=1)  # Shape: (n_samples, n_days)
+    
+    # Find when target is reached for each sample
+    reach_times = np.full(n_samples, np.nan)
+    for i in range(n_samples):
+        reached_mask = cumulative_rainfall[i, :] >= target_mm
+        if np.any(reached_mask):
+            reach_times[i] = days[np.argmax(reached_mask)]
+    
+    # Calculate statistics
+    reached_samples = ~np.isnan(reach_times)
+    probability_reach = np.mean(reached_samples)
+    
+    if np.any(reached_samples):
+        mean_days = np.mean(reach_times[reached_samples])
+        std_days = np.std(reach_times[reached_samples])
+        ci_95 = np.percentile(reach_times[reached_samples], [2.5, 97.5])
+    else:
+        mean_days = np.nan
+        std_days = np.nan
+        ci_95 = [np.nan, np.nan]
+    
+    return reach_times, {
+        'probability_reach': probability_reach,
+        'target_mm': target_mm,
+        'start_day': start_day,
+        'mean_days': mean_days,
+        'std_days': std_days,
+        'ci_95': ci_95,
+        'samples': reach_times
+    }
+
+
+def analyze_cumulative_rainfall_probability(trace, data, start_day, end_day, target_mm, n_samples=1000, show_plots=True):
+    """
+    Comprehensive analysis of cumulative rainfall probability within a date range.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from the hierarchical model
+    data : pd.DataFrame
+        Original data
+    start_day : int
+        Starting day of year
+    end_day : int
+        Ending day of year
+    target_mm : float
+        Target cumulative rainfall amount
+    n_samples : int
+        Number of samples to generate
+    show_plots : bool
+        Whether to display plots
+        
+    Returns:
+    --------
+    dict : Analysis results
+    """
+    # Sample cumulative rainfall
+    cumulative_rainfall, results = sample_cumulative_rainfall_probability(
+        trace, data, start_day, end_day, target_mm, n_samples
+    )
+    
+    # Get observed data for comparison
+    range_data = data[data['day_of_year'].between(start_day, end_day)]
+    observed_totals = range_data.groupby('year')['PRCP'].sum().values if len(range_data) > 0 else []
+    
+    # Print results
+    start_date = pd.to_datetime(f"2024-{start_day}", format='%Y-%j').strftime('%B %d')
+    end_date = pd.to_datetime(f"2024-{end_day}", format='%Y-%j').strftime('%B %d')
+    
+    print(f"CUMULATIVE RAINFALL PROBABILITY ANALYSIS")
+    print("=" * 60)
+    print(f"Period: {start_date} to {end_date}")
+    print(f"Target: {target_mm} mm")
+    print(f"Probability of reaching target: {results['probability_reach_target']:.3f} ({results['probability_reach_target']*100:.1f}%)")
+    print(f"Mean cumulative rainfall: {results['mean_cumulative']:.2f} ± {results['std_cumulative']:.2f} mm")
+    print(f"95% CI: [{results['ci_95'][0]:.2f}, {results['ci_95'][1]:.2f}] mm")
+    
+    if len(observed_totals) > 0:
+        print(f"Observed totals: {observed_totals}")
+        print(f"Observed mean: {np.mean(observed_totals):.2f} mm")
+        print(f"Observed std: {np.std(observed_totals):.2f} mm")
+    
+    # Create plots if requested
+    if show_plots:
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f"Cumulative Rainfall Analysis: {start_date} to {end_date}", fontsize=16)
+        
+        # Distribution of cumulative rainfall
+        axes[0, 0].hist(results['samples'], bins=50, alpha=0.7, density=True, color='skyblue', edgecolor='black')
+        axes[0, 0].axvline(results['mean_cumulative'], color='red', linestyle='--', linewidth=2, 
+                          label=f'Mean: {results["mean_cumulative"]:.1f}')
+        axes[0, 0].axvline(target_mm, color='green', linestyle='-', linewidth=2, 
+                          label=f'Target: {target_mm} mm')
+        axes[0, 0].axvline(results['ci_95'][0], color='gray', linestyle=':', alpha=0.7, label='95% CI')
+        axes[0, 0].axvline(results['ci_95'][1], color='gray', linestyle=':', alpha=0.7)
+        if len(observed_totals) > 0:
+            for i, obs in enumerate(observed_totals):
+                axes[0, 0].axvline(obs, color='orange', linestyle='-', alpha=0.7, linewidth=2, 
+                                 label='Observed' if i == 0 else "")
+        axes[0, 0].set_xlabel('Cumulative Rainfall (mm)')
+        axes[0, 0].set_ylabel('Density')
+        axes[0, 0].set_title('Distribution of Cumulative Rainfall')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Cumulative rainfall over time (mean and CI)
+        days = np.arange(start_day, end_day + 1)
+        cumulative_mean = np.mean(cumulative_rainfall, axis=0)
+        cumulative_std = np.std(cumulative_rainfall, axis=0)
+        cumulative_ci_lower = np.percentile(cumulative_rainfall, 2.5, axis=0)
+        cumulative_ci_upper = np.percentile(cumulative_rainfall, 97.5, axis=0)
+        
+        axes[0, 1].plot(days, cumulative_mean, linewidth=2, color='blue', label='Mean')
+        axes[0, 1].fill_between(days, cumulative_ci_lower, cumulative_ci_upper, alpha=0.3, color='blue', label='95% CI')
+        axes[0, 1].axhline(target_mm, color='green', linestyle='-', linewidth=2, label=f'Target: {target_mm} mm')
+        axes[0, 1].set_xlabel('Day of Year')
+        axes[0, 1].set_ylabel('Cumulative Rainfall (mm)')
+        axes[0, 1].set_title('Cumulative Rainfall Over Time')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Probability of reaching target by day
+        prob_by_day = np.mean(cumulative_rainfall >= target_mm, axis=0)
+        axes[1, 0].plot(days, prob_by_day, linewidth=2, color='red')
+        axes[1, 0].set_xlabel('Day of Year')
+        axes[1, 0].set_ylabel('Probability of Reaching Target')
+        axes[1, 0].set_title('Probability of Reaching Target by Day')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Box plot comparison
+        if len(observed_totals) > 0:
+            data_to_plot = [results['samples'], observed_totals]
+            labels = ['Predicted', 'Observed']
+            axes[1, 1].boxplot(data_to_plot, labels=labels)
+        else:
+            axes[1, 1].boxplot([results['samples']], labels=['Predicted'])
+        axes[1, 1].set_ylabel('Cumulative Rainfall (mm)')
+        axes[1, 1].set_title('Predicted vs Observed')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return results
+
+
+def analyze_rainfall_reach_time(trace, data, start_day, target_mm, max_days=31, n_samples=1000, show_plots=True):
+    """
+    Comprehensive analysis of when cumulative rainfall will reach a target amount.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from the hierarchical model
+    data : pd.DataFrame
+        Original data
+    start_day : int
+        Starting day of year
+    target_mm : float
+        Target cumulative rainfall amount
+    max_days : int
+        Maximum number of days to look ahead
+    n_samples : int
+        Number of samples to generate
+    show_plots : bool
+        Whether to display plots
+        
+    Returns:
+    --------
+    dict : Analysis results
+    """
+    # Sample reach times
+    reach_times, results = sample_rainfall_reach_time(
+        trace, data, start_day, target_mm, max_days, n_samples
+    )
+    
+    # Print results
+    start_date = pd.to_datetime(f"2024-{start_day}", format='%Y-%j').strftime('%B %d')
+    
+    print(f"RAINFALL REACH TIME ANALYSIS")
+    print("=" * 60)
+    print(f"Starting from: {start_date} (Day {start_day})")
+    print(f"Target: {target_mm} mm")
+    print(f"Probability of reaching target: {results['probability_reach']:.3f} ({results['probability_reach']*100:.1f}%)")
+    
+    if not np.isnan(results['mean_days']):
+        mean_date = pd.to_datetime(f"2024-{int(results['mean_days'])}", format='%Y-%j').strftime('%B %d')
+        print(f"Mean days to reach target: {results['mean_days']:.1f} days ({mean_date})")
+        print(f"Std days to reach target: {results['std_days']:.1f} days")
+        print(f"95% CI: [{results['ci_95'][0]:.1f}, {results['ci_95'][1]:.1f}] days")
+    else:
+        print("Target not reached within the specified time period")
+    
+    # Create plots if requested
+    if show_plots:
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f"Rainfall Reach Time Analysis: Starting {start_date}", fontsize=16)
+        
+        # Distribution of reach times
+        reached_samples = ~np.isnan(reach_times)
+        if np.any(reached_samples):
+            axes[0, 0].hist(reach_times[reached_samples], bins=30, alpha=0.7, density=True, 
+                           color='skyblue', edgecolor='black')
+            axes[0, 0].axvline(results['mean_days'], color='red', linestyle='--', linewidth=2, 
+                              label=f'Mean: {results["mean_days"]:.1f}')
+            axes[0, 0].axvline(results['ci_95'][0], color='gray', linestyle=':', alpha=0.7, label='95% CI')
+            axes[0, 0].axvline(results['ci_95'][1], color='gray', linestyle=':', alpha=0.7)
+        else:
+            axes[0, 0].text(0.5, 0.5, 'Target not reached\nwithin time period', 
+                           ha='center', va='center', transform=axes[0, 0].transAxes)
+        axes[0, 0].set_xlabel('Day of Year')
+        axes[0, 0].set_ylabel('Density')
+        axes[0, 0].set_title('Distribution of Reach Times')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Cumulative probability of reaching target
+        days = np.arange(start_day, start_day + max_days)
+        prob_by_day = []
+        for day in days:
+            # Calculate cumulative rainfall up to this day
+            day_range = np.arange(start_day, day + 1)
+            day_data = data[data['day_of_year'].isin(day_range)]
+            if len(day_data) > 0:
+                day_indices = day_data.index.values - data.index[0]
+                day_p_rain = trace.posterior.p_rain.values[:, :, day_indices]
+                day_mu_amount = trace.posterior.mu_amount.values[:, :, day_indices]
+                
+                # Sample for this day range
+                n_years = len(data['year'].unique())
+                n_days = len(day_range)
+                day_p_rain_by_day = day_p_rain.reshape(-1, n_years, n_days)
+                day_mu_amount_by_day = day_mu_amount.reshape(-1, n_years, n_days)
+                
+                sampled_year_indices = np.random.choice(n_years, size=min(100, day_p_rain_by_day.shape[0]))
+                sample_indices = np.arange(len(sampled_year_indices))
+                day_p_rain_sampled = day_p_rain_by_day[sample_indices, sampled_year_indices, :]
+                day_mu_amount_sampled = day_mu_amount_by_day[sample_indices, sampled_year_indices, :]
+                
+                rain_indicators = np.random.binomial(1, day_p_rain_sampled)
+                alpha_amount = trace.posterior.alpha_amount.values.flatten()[:len(sampled_year_indices)]
+                rainfall_amounts = np.zeros_like(day_p_rain_sampled)
+                rainy_mask = rain_indicators == 1
+                
+                if np.any(rainy_mask):
+                    alpha_expanded = np.broadcast_to(alpha_amount[:, None], (len(sampled_year_indices), n_days))
+                    rainfall_amounts[rainy_mask] = np.random.gamma(
+                        alpha_expanded[rainy_mask],
+                        day_mu_amount_sampled[rainy_mask] / alpha_expanded[rainy_mask]
+                    )
+                
+                cumulative_rainfall = np.cumsum(rainfall_amounts, axis=1)
+                prob_reach = np.mean(cumulative_rainfall[:, -1] >= target_mm)
+                prob_by_day.append(prob_reach)
+            else:
+                prob_by_day.append(0)
+        
+        axes[0, 1].plot(days, prob_by_day, linewidth=2, color='red')
+        axes[0, 1].axhline(0.5, color='gray', linestyle='--', alpha=0.7, label='50% probability')
+        axes[0, 1].set_xlabel('Day of Year')
+        axes[0, 1].set_ylabel('Probability of Reaching Target')
+        axes[0, 1].set_title('Cumulative Probability of Reaching Target')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Timeline visualization
+        if np.any(reached_samples):
+            reach_dates = [pd.to_datetime(f"2024-{int(day)}", format='%Y-%j').strftime('%b %d') 
+                          for day in reach_times[reached_samples]]
+            axes[1, 0].hist(reach_times[reached_samples], bins=30, alpha=0.7, color='lightgreen')
+            axes[1, 0].set_xlabel('Day of Year')
+            axes[1, 0].set_ylabel('Frequency')
+            axes[1, 0].set_title('Timeline of When Target is Reached')
+        else:
+            axes[1, 0].text(0.5, 0.5, 'Target not reached\nwithin time period', 
+                           ha='center', va='center', transform=axes[1, 0].transAxes)
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Summary statistics
+        axes[1, 1].text(0.1, 0.8, f"Target: {target_mm} mm", fontsize=12, transform=axes[1, 1].transAxes)
+        axes[1, 1].text(0.1, 0.7, f"Probability: {results['probability_reach']:.1%}", fontsize=12, transform=axes[1, 1].transAxes)
+        if not np.isnan(results['mean_days']):
+            mean_date = pd.to_datetime(f"2024-{int(results['mean_days'])}", format='%Y-%j').strftime('%B %d')
+            axes[1, 1].text(0.1, 0.6, f"Mean reach time: {results['mean_days']:.1f} days", fontsize=12, transform=axes[1, 1].transAxes)
+            axes[1, 1].text(0.1, 0.5, f"Mean date: {mean_date}", fontsize=12, transform=axes[1, 1].transAxes)
+            axes[1, 1].text(0.1, 0.4, f"95% CI: {results['ci_95'][0]:.1f}-{results['ci_95'][1]:.1f} days", fontsize=12, transform=axes[1, 1].transAxes)
+        else:
+            axes[1, 1].text(0.1, 0.6, "Target not reached", fontsize=12, transform=axes[1, 1].transAxes)
+        axes[1, 1].set_xlim(0, 1)
+        axes[1, 1].set_ylim(0, 1)
+        axes[1, 1].axis('off')
+        axes[1, 1].set_title('Summary Statistics')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return results
+
+
 def _get_observed_data(data):
     """Extract observed data for plotting."""
     observed_rain_prob = data.groupby('day_of_year')['PRCP'].apply(lambda x: (x > 0).mean()).values
