@@ -917,7 +917,7 @@ def _evaluate_hierarchical_model_for_day(trace, day_of_year, year=None):
     day_of_year : int
         Day of year (1-365)
     year : int, optional
-        Year for year-specific prediction. If None, uses average year effects.
+        Year for year-specific prediction. If None, samples from year effect distribution to include prediction uncertainty.
     
     Returns:
     --------
@@ -958,9 +958,11 @@ def _evaluate_hierarchical_model_for_day(trace, day_of_year, year=None):
         year_rain_effect = year_rain_effects[:, :, year_idx]  # Shape: (chains, draws)
         year_amount_effect = year_amount_effects[:, :, year_idx]
     else:
-        # Use average year effects (all zeros since they're centered)
-        year_rain_effect = np.zeros_like(c_rain)
-        year_amount_effect = np.zeros_like(c_amount)
+        # Sample from the distribution of year effects to include prediction uncertainty
+        # This accounts for the uncertainty in year effects when predicting for an unknown year
+        # Randomly sample from all year effects and reshape to match (chains, draws)
+        year_rain_effect = np.random.choice(year_rain_effects.flatten(), size=c_rain.shape)
+        year_amount_effect = np.random.choice(year_amount_effects.flatten(), size=c_amount.shape)
     
     # Calculate rain probability for all samples
     # Reshape for broadcasting: (chains, draws, n_harmonics) @ (n_harmonics,) -> (chains, draws)
@@ -1568,6 +1570,191 @@ def _sample_posterior_predictive_hierarchical(trace, data, days_of_year, expecte
     print(f"  Efficient hierarchical posterior predictive sampling completed!")
     
     return rain_indicators, rainfall_amounts
+
+
+def sample_december_total_rainfall(trace, data, n_samples=1000):
+    """
+    Sample total rainfall for December using trace.posterior.p_rain and mu_amount.
+    
+    This ultra-simplified version uses the deterministic variables stored in the trace
+    to avoid recomputing harmonic functions and year effects.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from the hierarchical model
+    data : pd.DataFrame
+        Original data with 'day_of_year' column
+    n_samples : int
+        Number of samples to generate
+    
+    Returns:
+    --------
+    array : Samples of total December rainfall (mm)
+    """
+    # Get December days (335-365)
+    december_days = np.arange(335, 366)
+    
+    # Get all December data (across all years)
+    december_data = data[data['day_of_year'].between(335, 365)]
+    december_indices = december_data.index.values - data.index[0]
+    
+    # Get p_rain and mu_amount for all December observations from trace
+    december_p_rain = trace.posterior.p_rain.values[:, :, december_indices]  # Shape: (chains, draws, n_december_obs)
+    december_mu_amount = trace.posterior.mu_amount.values[:, :, december_indices]
+    
+    # Reshape to group by day of year: (chains, draws, n_years, n_days)
+    n_years = len(data['year'].unique())
+    n_days = len(december_days)
+    december_p_rain_by_day = december_p_rain.reshape(-1, n_years, n_days)  # Flatten chains and draws
+    december_mu_amount_by_day = december_mu_amount.reshape(-1, n_years, n_days)
+    
+    # Sample one random year for each posterior sample
+    n_samples = december_p_rain_by_day.shape[0]
+    sampled_year_indices = np.random.choice(n_years, size=n_samples)
+    
+    # Extract the sampled year for each posterior sample
+    sample_indices = np.arange(n_samples)
+    december_p_rain_sampled = december_p_rain_by_day[sample_indices, sampled_year_indices, :]  # Shape: (n_samples, n_days)
+    december_mu_amount_sampled = december_mu_amount_by_day[sample_indices, sampled_year_indices, :]
+    
+    # Limit to requested number of samples
+    n_samples = min(n_samples, december_p_rain_sampled.shape[0])
+    december_p_rain_sampled = december_p_rain_sampled[:n_samples]
+    december_mu_amount_sampled = december_mu_amount_sampled[:n_samples]
+    
+    # Sample rain indicators
+    rain_indicators = np.random.binomial(1, december_p_rain_sampled)
+    
+    # Sample rainfall amounts for rainy days
+    alpha_amount = trace.posterior.alpha_amount.values.flatten()[:n_samples]
+    rainfall_amounts = np.zeros_like(december_p_rain_sampled)
+    rainy_mask = rain_indicators == 1
+    
+    if np.any(rainy_mask):
+        alpha_expanded = np.broadcast_to(alpha_amount[:, None], (n_samples, n_days))
+        rainfall_amounts[rainy_mask] = np.random.gamma(
+            alpha_expanded[rainy_mask],
+            december_mu_amount_sampled[rainy_mask] / alpha_expanded[rainy_mask]
+        )
+    
+    # Sum across days
+    december_totals = np.sum(rainfall_amounts, axis=1)
+    
+    return december_totals
+
+
+def analyze_december_rainfall(trace, data, n_samples=1000, show_plots=True):
+    """
+    Comprehensive analysis of December total rainfall distribution.
+    
+    Parameters:
+    -----------
+    trace : arviz.InferenceData
+        MCMC trace from the hierarchical model
+    data : pd.DataFrame
+        Original data
+    n_samples : int
+        Number of samples to generate
+    show_plots : bool
+        Whether to display plots
+        
+    Returns:
+    --------
+    dict : Analysis results
+    """
+    # Sample December total rainfall
+    december_totals = sample_december_total_rainfall(trace, data, n_samples)
+    
+    # Calculate statistics
+    mean_total = np.mean(december_totals)
+    std_total = np.std(december_totals)
+    median_total = np.median(december_totals)
+    ci_95 = np.percentile(december_totals, [2.5, 97.5])
+    ci_90 = np.percentile(december_totals, [5, 95])
+    ci_50 = np.percentile(december_totals, [25, 75])
+    
+    # Get observed December totals for comparison
+    december_data = data[data['day_of_year'].between(335, 365)]
+    observed_totals = december_data.groupby('year')['PRCP'].sum().values if len(december_data) > 0 else []
+    
+    # Print results
+    print(f"DECEMBER TOTAL RAINFALL ANALYSIS")
+    print("=" * 60)
+    print(f"Predicted mean: {mean_total:.2f} ± {std_total:.2f} mm")
+    print(f"Predicted median: {median_total:.2f} mm")
+    print(f"95% CI: [{ci_95[0]:.2f}, {ci_95[1]:.2f}] mm")
+    print(f"90% CI: [{ci_90[0]:.2f}, {ci_90[1]:.2f}] mm")
+    print(f"50% CI: [{ci_50[0]:.2f}, {ci_50[1]:.2f}] mm")
+    
+    if len(observed_totals) > 0:
+        print(f"Observed totals: {observed_totals}")
+        print(f"Observed mean: {np.mean(observed_totals):.2f} mm")
+        print(f"Observed std: {np.std(observed_totals):.2f} mm")
+    
+    # Create plots if requested
+    if show_plots:
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle("December Total Rainfall Analysis", fontsize=16)
+        
+        # Distribution of total rainfall
+        axes[0, 0].hist(december_totals, bins=50, alpha=0.7, density=True, color='skyblue', edgecolor='black')
+        axes[0, 0].axvline(mean_total, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_total:.1f}')
+        axes[0, 0].axvline(median_total, color='orange', linestyle='--', linewidth=2, label=f'Median: {median_total:.1f}')
+        axes[0, 0].axvline(ci_95[0], color='gray', linestyle=':', alpha=0.7, label='95% CI')
+        axes[0, 0].axvline(ci_95[1], color='gray', linestyle=':', alpha=0.7)
+        if len(observed_totals) > 0:
+            for i, obs in enumerate(observed_totals):
+                axes[0, 0].axvline(obs, color='green', linestyle='-', alpha=0.7, linewidth=2, 
+                                 label='Observed' if i == 0 else "")
+        axes[0, 0].set_xlabel('Total December Rainfall (mm)')
+        axes[0, 0].set_ylabel('Density')
+        axes[0, 0].set_title('Distribution of Total December Rainfall')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Q-Q plot against normal distribution
+        from scipy import stats
+        stats.probplot(december_totals, dist="norm", plot=axes[0, 1])
+        axes[0, 1].set_title('Q-Q Plot (Normal Distribution)')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Cumulative distribution
+        sorted_totals = np.sort(december_totals)
+        cumulative_prob = np.arange(1, len(sorted_totals) + 1) / len(sorted_totals)
+        axes[1, 0].plot(sorted_totals, cumulative_prob, linewidth=2, color='blue')
+        axes[1, 0].axhline(0.5, color='red', linestyle='--', alpha=0.7, label='50th percentile')
+        axes[1, 0].axhline(0.95, color='orange', linestyle='--', alpha=0.7, label='95th percentile')
+        axes[1, 0].set_xlabel('Total December Rainfall (mm)')
+        axes[1, 0].set_ylabel('Cumulative Probability')
+        axes[1, 0].set_title('Cumulative Distribution Function')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Box plot comparison with observed data
+        if len(observed_totals) > 0:
+            data_to_plot = [december_totals, observed_totals]
+            labels = ['Predicted', 'Observed']
+            axes[1, 1].boxplot(data_to_plot, labels=labels)
+        else:
+            axes[1, 1].boxplot([december_totals], labels=['Predicted'])
+        axes[1, 1].set_ylabel('Total December Rainfall (mm)')
+        axes[1, 1].set_title('Predicted vs Observed')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return {
+        'samples': december_totals,
+        'mean': mean_total,
+        'std': std_total,
+        'median': median_total,
+        'ci_95': ci_95,
+        'ci_90': ci_90,
+        'ci_50': ci_50,
+        'observed_totals': observed_totals
+    }
 
 
 def _get_observed_data(data):

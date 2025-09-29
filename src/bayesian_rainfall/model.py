@@ -143,13 +143,22 @@ def create_model(data, n_harmonics=5, include_trend=False, noncentered=True):
         rainy_sin_features = pm.math.sin(2 * h_values_rainy * np.pi * rainy_day_values / 365.25)
         rainy_cos_features = pm.math.cos(2 * h_values_rainy * np.pi * rainy_day_values / 365.25)
         
-        # Expected rainfall amount using all harmonics + year effects + trend
-        log_mu_amount = (c_amount + 
-                        pm.math.sum(a_amount[:, None] * rainy_sin_features + b_amount[:, None] * rainy_cos_features, axis=0) +
-                        year_amount_effects[all_rainy_year_indices] +
-                        trend_amount_contribution)
+        # Expected rainfall amount for ALL days (not just rainy days)
+        # This allows us to use mu_amount for any day of the year
+        log_mu_amount_all = (c_amount + 
+                            pm.math.sum(a_amount[:, None] * sin_features + b_amount[:, None] * cos_features, axis=0) +
+                            year_amount_effects[all_year_indices] +
+                            trend_amount_contribution)
         
-        mu_amount = pm.math.exp(log_mu_amount)
+        mu_amount_all = pm.Deterministic("mu_amount", pm.math.exp(log_mu_amount_all))
+        
+        # Expected rainfall amount for rainy days only (for the observed data)
+        log_mu_amount_rainy = (c_amount + 
+                              pm.math.sum(a_amount[:, None] * rainy_sin_features + b_amount[:, None] * rainy_cos_features, axis=0) +
+                              year_amount_effects[all_rainy_year_indices] +
+                              trend_amount_contribution)
+        
+        mu_amount_rainy = pm.math.exp(log_mu_amount_rainy)
         
         # Shape parameter for gamma
         alpha_amount = pm.Gamma("alpha_amount", alpha=2.0, beta=1.0)  # Mean=2.0
@@ -157,7 +166,7 @@ def create_model(data, n_harmonics=5, include_trend=False, noncentered=True):
         # Rainfall amount (only for days when it rains)
         rainfall_amount = pm.Gamma("rainfall_amount", 
                                  alpha=alpha_amount, 
-                                 beta=alpha_amount/mu_amount, 
+                                 beta=alpha_amount/mu_amount_rainy, 
                                  observed=all_rainy_rainfall)
         
         # Store year information for later use
